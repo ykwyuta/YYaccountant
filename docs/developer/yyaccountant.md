@@ -7,9 +7,9 @@
 | `yyaccountant --web` | パスワード認証のWeb UI（Linux／Windows） |
 | `yyaccountant --mcp` | stdio MCPサーバー（Linux／Windows） |
 | `--init-demo` `--backup` `--generate-password` | 補助コマンド |
-| `yyaccountantw` | Windowsネイティブ画面（かんたん入力・仕訳帳・仕訳入力・帳票、帳簿の作成と設定、バックアップ、仕訳CSV） |
+| `yyaccountantw` | Windowsネイティブ画面（Web UIと同じ機能。グラフは表で代える） |
 
-ネイティブ画面は標準のWin32コントロールだけで作り、YYprojectが使うyyeditorの `yy-ui-win`（Direct2D描画の表・エディター）には依存しません。債権債務・予算・計画・原価・統計・科目と取引先の編集はWeb UIとMCPだけにあります。Streamable HTTP MCP、PostgreSQLはこの版では提供しません。データは要件どおり1つのSQLiteファイルにまとめています。
+ネイティブ画面は標準のWin32コントロールだけで作り、YYprojectが使うyyeditorの `yy-ui-win`（Direct2D描画の表・エディター）には依存しません。Streamable HTTP MCP、PostgreSQLはこの版では提供しません。データは要件どおり1つのSQLiteファイルにまとめています。
 
 ## 構成
 
@@ -35,8 +35,9 @@ app/src
   web/         埋め込みのHTML・CSS・JavaScript
   gui_main.rs  yyaccountantw（windows_subsystem、エラーはメッセージボックス）
   native.rs    ウィンドウ・メニュー・ページの配置・コマンド・定期読み込み
-  native/sheets.rs  表と見出しの中身（十進数のまま整形、窓なしで試験）
-  native/form.rs    帳簿の作成・設定に使う小さなモーダルフォーム
+  native/sheets.rs  記帳4画面の表と見出しの中身（十進数のまま整形、窓なしで試験）
+  native/records.rs 記録の画面（科目・取引先・債権債務・予算・計画・原価・統計・履歴）の表、フォーム、Change
+  native/form.rs    帳簿と各記録の入力に使うモーダルフォーム（文字・選択肢・IDの選択）
   native/smoke.rs   --ui-smoke-test の自己検証
 app/build.rs   Windowsマニフェスト（コモンコントロールv6、PerMonitorV2）とアイコンの埋め込み
 ```
@@ -92,9 +93,10 @@ app/build.rs   Windowsマニフェスト（コモンコントロールv6、PerMo
 - 1秒ごとに `PRAGMA data_version` を調べ、他の接続（MCP・Web UI・別のウィンドウ）が書き込んでいれば帳簿の一覧と版を比べて読み込み直す。自分の書き込みでは値が変わらない。
 - 操作者は `USERNAME`（Windows）。読み取り専用で開くと書き込むボタンと帳簿メニューを無効にする。
 - DPIはPerMonitorV2。寸法は96DPI基準の値を `GetDpiForWindow` で拡大し、`WM_DPICHANGED` でフォントと一覧の列幅を作り直す。最小サイズは860×600（96DPI換算）。画面が小さく最小サイズに届かないときは、1行に並べる欄を同じ比率で縮める。
+- 5ページ目以降（記録の画面）は1組の共有コントロール（表示の切り替え、基準日・期間、一覧、詳細、要約、最大5つのボタン）を使う。何を表示し、どのボタンがどのフォームを開き、どの `Change` を作るかは `native/records.rs` の `Section`・`Spec`・`view`・`prepare`・`finish` で決める。フォームは状態を借りずに開き、閉じた後に同じ版で適用する。削除と償却の計上は確認してから適用する。計画の予定は詳細行のIDに計画IDと日付を、製品の構成は材料を正、設備を負のIDで持つ。
 - 各入力欄の直前に静的テキストを作るので、スクリーンリーダーとUI Automationは見出しを入力欄の名前として読む。Tab移動は `IsDialogMessageW`、ページ切り替えとF5はアクセラレーター。
 
-`yyaccountantw --ui-smoke-test DIR` は新しい `DIR/ui-test.sqlite3` に対して、実際のウィンドウへメッセージを送って操作する: 帳簿作成フォーム、貸借不一致の拒否と複合仕訳、全角金額のかんたん入力、JPYの小数の拒否、科目検索と使い分けの表示、取消・解除・検索、同じ番号での修正、別接続の変更の自動読み込みと古い版の保存の競合、4種類の帳票（試算表・貸借対照表の一致と元帳残高）、帳簿の設定、バックアップとCSV、個人事業主の事業割合、帳簿の切り替え、最小と大きいサイズでの全ページの配置（はみ出しと重なり）、DPI変更、読み取り専用。結果を `DIR/ui-smoke.txt`、画面を `DIR/page1〜4.bmp` に書き、失敗時は `DIR/error.txt` に理由を書いて終了コード1で終わる。確認のためのメッセージボックスは出さず記録する。
+`yyaccountantw --ui-smoke-test DIR` は新しい `DIR/ui-test.sqlite3` に対して、実際のウィンドウへメッセージを送って操作する: 帳簿作成フォーム、貸借不一致の拒否と複合仕訳、全角金額のかんたん入力、JPYの小数の拒否、科目検索と使い分けの表示、取消・解除・検索、同じ番号での修正、別接続の変更の自動読み込みと古い版の保存の競合、4種類の帳票（試算表・貸借対照表の一致と元帳残高）、帳簿の設定、バックアップとCSV、個人事業主の事業割合、帳簿の切り替え、科目の追加・編集と取引先の追加・削除、債権の登録（発生の仕訳）と回収、予算の作成・科目の予算・外す、計画の計上と二重計上の拒否、統計・予測・変更履歴、原材料・仕入・設備（償却の計上）・製品の構成と標準原価・製造実績と在庫の払出し、最小未満・最小・大きいサイズでの全ページの配置（はみ出しと重なり）、DPI変更、読み取り専用。結果を `DIR/ui-smoke.txt`、画面を `DIR/page1〜11.bmp` に書き、失敗時は `DIR/error.txt` に理由を書いて終了コード1で終わる。確認のためのメッセージボックスは出さず記録する。
 
 ## 検証
 

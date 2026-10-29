@@ -25,6 +25,6 @@ cargo build --workspace --release --locked
 - [開発・内部仕様・検証](docs/developer/yyaccountant.md)
 - [検討経緯・検証記録](docs/history/README.md)
 
-[YYproject](https://github.com/ykwyuta/yyproject) の構成（core／appのCargoワークスペース、SQLiteの版管理と監査、stdio MCP、パスワード認証Web UI、`yyprojectw` 形式のWindowsネイティブ画面）を参考にしています。ネイティブ画面は記帳・仕訳帳・帳票に絞っており、債権債務・予算・計画・原価・統計はWeb UIかMCPで扱います（[開発文書](docs/developer/yyaccountant.md#範囲)）。勘定科目の説明は一般的な記帳の考え方で、個別の税務判断に代わるものではありません。
+[YYproject](https://github.com/ykwyuta/yyproject) の構成（core／appのCargoワークスペース、SQLiteの版管理と監査、stdio MCP、パスワード認証Web UI、`yyprojectw` 形式のWindowsネイティブ画面）を参考にしています。ネイティブ画面はWeb UIと同じ機能（記帳・仕訳帳・帳票・勘定科目と取引先・債権債務・予算・計画・原価・統計と予測・変更履歴）を標準のWindowsコントロールで提供します（[開発文書](docs/developer/yyaccountant.md#範囲)）。勘定科目の説明は一般的な記帳の考え方で、個別の税務判断に代わるものではありません。
 
 本体のライセンスは [GPL-3.0-or-later](COPYING) です。[素材・依存の案内](NOTICE.md)も参照してください。

@@ -1,4 +1,4 @@
-//! Small modal form (text fields and choices) used for book creation and settings.
+//! Small modal form (text fields and choices) used for books and every record page.
 //! The owner is disabled while it is open; Tab, Enter and Esc work as in a dialog.
 use super::*;
 
@@ -6,16 +6,24 @@ pub(super) enum Field {
     Text(&'static str, String),
     /// Label, options and the selected index. The value returned is the index.
     Choice(&'static str, Vec<String>, usize),
+    /// Label, (ID, text) items and the selected ID. The value returned is the ID.
+    Pick(&'static str, Vec<(i64, String)>, i64),
 }
 impl Field {
     fn label(&self) -> &'static str {
         match self {
-            Self::Text(l, _) | Self::Choice(l, _, _) => l,
+            Self::Text(l, _) | Self::Choice(l, _, _) | Self::Pick(l, _, _) => l,
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Input {
+    Text,
+    Choice,
+    Pick,
+}
 struct Form {
-    inputs: Vec<(HWND, bool)>,
+    inputs: Vec<(HWND, Input)>,
     labels: Vec<&'static str>,
     done: bool,
     accepted: Option<Vec<String>>,
@@ -47,12 +55,10 @@ pub(super) fn register(instance: HINSTANCE, icon: HICON) -> Result<()> {
 fn collect(f: &Form) -> Vec<String> {
     f.inputs
         .iter()
-        .map(|(h, choice)| {
-            if *choice {
-                combo_index(*h).unwrap_or(0).to_string()
-            } else {
-                text(*h)
-            }
+        .map(|(h, input)| match input {
+            Input::Text => text(*h),
+            Input::Choice => combo_index(*h).unwrap_or(0).to_string(),
+            Input::Pick => combo_value(*h).unwrap_or(0).to_string(),
         })
         .collect()
 }
@@ -89,21 +95,24 @@ extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
                         return;
                     };
                     SMOKE_VALUES.with(|values| {
-                        for ((input, choice), label) in f.inputs.iter().zip(&f.labels) {
+                        for ((input, kind), label) in f.inputs.iter().zip(&f.labels) {
                             let Some(value) = values.borrow().get(*label).cloned() else {
                                 continue;
                             };
-                            if *choice {
-                                let wanted = wide(&value);
-                                let index = send(
-                                    *input,
-                                    CB_FINDSTRINGEXACT,
-                                    usize::MAX,
-                                    wanted.as_ptr() as isize,
-                                );
-                                send(*input, CB_SETCURSEL, index.0.max(0) as usize, 0);
-                            } else {
+                            if *kind == Input::Text {
                                 set_text(*input, &value);
+                                continue;
+                            }
+                            // The first option containing the value, as a user would pick it.
+                            let count = send(*input, CB_GETCOUNT, 0, 0).0.max(0) as usize;
+                            for i in 0..count {
+                                let length = send(*input, CB_GETLBTEXTLEN, i, 0).0.max(0) as usize;
+                                let mut buffer = vec![0u16; length + 1];
+                                send(*input, CB_GETLBTEXT, i, buffer.as_mut_ptr() as isize);
+                                if String::from_utf16_lossy(&buffer[..length]).contains(&value) {
+                                    send(*input, CB_SETCURSEL, i, 0);
+                                    break;
+                                }
                             }
                         }
                         values.borrow_mut().clear();
@@ -124,7 +133,7 @@ pub(super) fn show(owner: HWND, title: &str, fields: Vec<Field>) -> Option<Vec<S
         let dpi = GetDpiForWindow(owner).max(96) as i32;
         let px = |v: i32| scale(dpi, v);
         let instance: HINSTANCE = GetModuleHandleW(None).ok()?.into();
-        let (label_w, field_w, row, m) = (px(150), px(260), px(36), px(16));
+        let (label_w, field_w, row, m) = (px(240), px(300), px(36), px(16));
         let width = m * 2 + label_w + field_w;
         let height = m * 2 + row * fields.len() as i32 + px(44);
         let mut frame = RECT {
@@ -203,6 +212,18 @@ pub(super) fn show(owner: HWND, title: &str, fields: Vec<Field>) -> Option<Vec<S
                     id,
                     rect(m + label_w, y, field_w, px(26)),
                 ),
+                Field::Pick(_, items, selected) => {
+                    let c = child(
+                        w!("COMBOBOX"),
+                        "",
+                        CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | WS_TABSTOP.0,
+                        WINDOW_EX_STYLE(0),
+                        id,
+                        rect(m + label_w, y, field_w, px(300)),
+                    );
+                    fill_combo(c, items, Some(*selected));
+                    c
+                }
                 Field::Choice(_, options, selected) => {
                     let c = child(
                         w!("COMBOBOX"),
@@ -221,7 +242,14 @@ pub(super) fn show(owner: HWND, title: &str, fields: Vec<Field>) -> Option<Vec<S
                     c
                 }
             };
-            inputs.push((input, matches!(field, Field::Choice(..))));
+            inputs.push((
+                input,
+                match field {
+                    Field::Text(..) => Input::Text,
+                    Field::Choice(..) => Input::Choice,
+                    Field::Pick(..) => Input::Pick,
+                },
+            ));
             labels.push(field.label());
         }
         let y = height - m - px(32);

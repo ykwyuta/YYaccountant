@@ -21,13 +21,13 @@ pub(super) struct Table {
     pub rows: Vec<(i64, Vec<String>)>,
 }
 impl Table {
-    fn new(columns: &[(&'static str, i32, Align)]) -> Self {
+    pub(super) fn new(columns: &[(&'static str, i32, Align)]) -> Self {
         Self {
             columns: columns.to_vec(),
             rows: vec![],
         }
     }
-    fn push(&mut self, id: i64, cells: Vec<String>) {
+    pub(super) fn push(&mut self, id: i64, cells: Vec<String>) {
         self.rows.push((id, cells));
     }
 }
@@ -62,7 +62,7 @@ pub(super) fn money(book: &Book, d: Decimal) -> String {
     }
 }
 /// Blank for zero, so debit/credit columns read like a paper journal.
-fn side(book: &Book, d: Decimal) -> String {
+pub(super) fn side(book: &Book, d: Decimal) -> String {
     if d.is_zero() {
         String::new()
     } else {
@@ -81,12 +81,12 @@ pub(super) fn amount(text: &str) -> Result<Decimal> {
 pub(super) fn label(a: &Account) -> String {
     format!("{} {}", a.code, a.name)
 }
-fn name(book: &Book, id: i64) -> String {
+pub(super) fn name(book: &Book, id: i64) -> String {
     book.account(id)
         .map(|a| a.name.clone())
         .unwrap_or_else(|_| format!("#{id}"))
 }
-fn partner(book: &Book, id: Option<i64>) -> String {
+pub(super) fn partner(book: &Book, id: Option<i64>) -> String {
     id.and_then(|p| book.partners.iter().find(|x| x.id == p))
         .map(|p| p.name.clone())
         .unwrap_or_default()

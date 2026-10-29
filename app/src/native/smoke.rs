@@ -85,6 +85,21 @@ fn account(name: &str) -> Result<i64> {
     })?
     .ok_or_else(|| format!("No account {name}").into())
 }
+/// Values the next form receives, by field label (choices by option text).
+fn fill(values: &[(&str, &str)]) {
+    form::SMOKE_VALUES.with(|v| {
+        *v.borrow_mut() = values
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    });
+}
+fn book() -> Result<Book> {
+    state(|s| s.book.clone())?.ok_or_else(|| "No book".into())
+}
+fn summary() -> Result<String> {
+    Ok(text(handle(ID_G_SUMMARY)?))
+}
 fn entries() -> Result<Vec<Entry>> {
     state(|s| {
         s.book
@@ -578,6 +593,8 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
         log,
     )?;
 
+    records(h, log)?;
+
     // Layout at the minimum and a large size, on every page; screenshots at the large size.
     let mut shots = 0;
     // 680x500 is below the minimum: what a 1024x768 screen at 150% leaves (CI runners).
@@ -651,6 +668,12 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
         "読み取り専用で開くと書き込みを無効にする",
         log,
     )?;
+    menu(h, ID_PAGE + RECORDS as u16);
+    check(
+        unsafe { !IsWindowEnabled(handle(ID_G_NEW)?).as_bool() },
+        "読み取り専用では記録の追加も無効",
+        log,
+    )?;
     SMOKE_FILE.with(|f| *f.borrow_mut() = Some(path.clone()));
     menu(h, ID_OPEN);
     check(!state(|s| s.read_only)?, "通常モードで開き直す", log)?;
@@ -659,6 +682,266 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
     check(
         left.is_empty(),
         &format!("想定外のメッセージなし {left:?}"),
+        log,
+    )?;
+    Ok(())
+}
+
+/// Record pages: accounts, partners, claims, budgets, plans, costs, statistics, history.
+fn records(h: HWND, log: &mut Vec<String>) -> Result<()> {
+    let page = |n: usize| ID_PAGE + (RECORDS + n) as u16;
+    // Accounts and partners (household book).
+    menu(h, page(0));
+    check(
+        rows(ID_G_LIST)? == book()?.accounts.len(),
+        "勘定科目の一覧を表示",
+        log,
+    )?;
+    select(ID_G_LIST, find_row(ID_G_LIST, 1, "食費")?)?;
+    check(
+        rows(ID_G_DETAIL)? > 0 && summary()?.contains("食費"),
+        "科目を選ぶと使い分けの例を表示",
+        log,
+    )?;
+    fill(&[
+        ("コード", "699"),
+        ("科目名", "UI検証費"),
+        ("区分", "費用"),
+        ("使い分けの説明", "検証用の科目"),
+    ]);
+    click(h, ID_G_NEW)?;
+    select(ID_G_LIST, find_row(ID_G_LIST, 1, "UI検証費")?)?;
+    fill(&[("科目名", "UI検証費（改）"), ("使用停止", "はい")]);
+    click(h, ID_G_EDIT)?;
+    check(
+        book()?
+            .accounts
+            .iter()
+            .any(|a| a.code == "699" && a.name == "UI検証費（改）" && a.archived),
+        "科目を追加・編集（使用停止）",
+        log,
+    )?;
+    choose(h, ID_G_VIEW, "取引先")?;
+    fill(&[("名前", "UI商店"), ("メモ", "検証")]);
+    click(h, ID_G_NEW)?;
+    let added = book()?.partners.iter().any(|p| p.name == "UI商店");
+    select(ID_G_LIST, find_row(ID_G_LIST, 0, "UI商店")?)?;
+    click(h, ID_G_REMOVE)?;
+    check(
+        added && !book()?.partners.iter().any(|p| p.name == "UI商店"),
+        "取引先を追加して、未使用なので削除",
+        log,
+    )?;
+
+    // Claims: a loan to a friend, repaid in five parts.
+    menu(h, page(1));
+    fill(&[
+        ("区分", "債権"),
+        ("件名", "友人への貸付"),
+        ("科目（売掛金・貸付金・借入金など）", "貸付金"),
+        ("元本", "50,000"),
+        ("返済方法", "元金均等"),
+        ("回数（月払い）", "5"),
+        ("発生の仕訳の相手科目", "普通預金"),
+    ]);
+    click(h, ID_G_NEW)?;
+    select(ID_G_LIST, find_row(ID_G_LIST, 1, "友人への貸付")?)?;
+    check(
+        rows(ID_G_DETAIL)? == 5
+            && entries()?.iter().any(|e| {
+                e.source.ends_with(":opening") && e.total() == num::parse("50000").unwrap()
+            }),
+        "債権を登録し、返済予定5回と発生の仕訳を作成",
+        log,
+    )?;
+    fill(&[]);
+    click(h, ID_G_FIRST)?;
+    let row = find_row(ID_G_LIST, 1, "友人への貸付")?;
+    check(
+        cell(handle(ID_G_LIST)?, row, 6) == "40,000",
+        "回収フォーム（初回分の既定値）で残高40,000",
+        log,
+    )?;
+
+    // Budget: monthly food budget, then taken out again.
+    menu(h, page(2));
+    check(
+        summary()?.contains("予算がありません"),
+        "予算がないときの案内",
+        log,
+    )?;
+    fill(&[]);
+    click(h, ID_G_NEW)?;
+    fill(&[
+        ("科目", "食費"),
+        ("毎月同額（入れると各月より優先）", "30000"),
+    ]);
+    click(h, ID_G_FIRST)?;
+    let row = find_row(ID_G_LIST, 0, "食費")?;
+    check(
+        cell(handle(ID_G_LIST)?, row, 1) == "360,000",
+        "予算を作成し、食費を毎月30,000（年360,000）に設定",
+        log,
+    )?;
+    select(ID_G_LIST, row)?;
+    click(h, ID_G_SECOND)?;
+    check(book()?.budgets[0].lines.is_empty(), "科目の予算を外す", log)?;
+
+    // Plans: monthly rent, one occurrence posted (and not twice).
+    menu(h, page(3));
+    fill(&[
+        ("名前", "家賃"),
+        ("借方科目", "住居費"),
+        ("貸方科目", "普通預金"),
+        ("金額", "80000"),
+    ]);
+    click(h, ID_G_NEW)?;
+    check(
+        rows(ID_G_DETAIL)? == 4,
+        "毎月の計画の予定を3か月先まで表示",
+        log,
+    )?;
+    select(ID_G_DETAIL, 0)?;
+    click(h, ID_G_FIRST)?;
+    select(ID_G_DETAIL, 0)?;
+    click(h, ID_G_FIRST)?;
+    let posted = entries()?
+        .iter()
+        .filter(|e| !e.void && e.source.starts_with("plan:"))
+        .count();
+    check(
+        posted == 1
+            && cell(handle(ID_G_DETAIL)?, 0, 5) == "計上済"
+            && messages().iter().any(|m| m.contains("計上")),
+        "予定を計上し、二重計上は拒否",
+        log,
+    )?;
+
+    // Statistics, forecast and history.
+    menu(h, page(5));
+    check(rows(ID_G_LIST)? == 12, "月別の収支を12か月表示", log)?;
+    choose(h, ID_G_VIEW, "科目別")?;
+    check(rows(ID_G_LIST)? > 0, "科目別の統計を表示", log)?;
+    choose(h, ID_G_VIEW, "予測")?;
+    check(
+        rows(ID_G_LIST)? == 6 && rows(ID_G_DETAIL)? > 0,
+        "6か月の予測と科目ごとの方法を表示",
+        log,
+    )?;
+    menu(h, page(6));
+    let id = book()?.id;
+    let audit = state(|s| s.store.audit(id, 0).map(|a| a.len()))??;
+    check(
+        rows(ID_G_LIST)? == audit && cell(handle(ID_G_LIST)?, 0, 2) == "UI-test",
+        "変更履歴を新しい順に表示",
+        log,
+    )?;
+
+    // Costs in the sole proprietor book.
+    let business = state(|s| {
+        s.books
+            .iter()
+            .find(|b| b.name == "UI検証 事業")
+            .map(|b| b.id)
+    })?
+    .ok_or("No business book")?;
+    let books = handle(ID_BOOK)?;
+    select_combo(books, business);
+    send(
+        h,
+        WM_COMMAND,
+        (CBN_SELCHANGE as usize) << 16 | ID_BOOK as usize,
+        books.0 as isize,
+    );
+    menu(h, page(4));
+    fill(&[
+        ("名前", "小麦粉"),
+        ("単位（kg・個など）", "kg"),
+        ("標準単価", "200"),
+    ]);
+    click(h, ID_G_NEW)?;
+    choose(h, ID_G_VIEW, "仕入")?;
+    fill(&[
+        ("原材料", "小麦粉"),
+        ("数量（調整は減少を負で）", "10"),
+        ("単価（調整は空欄可）", "180"),
+    ]);
+    click(h, ID_G_NEW)?;
+    choose(h, ID_G_VIEW, "設備")?;
+    fill(&[
+        ("名前", "オーブン"),
+        ("取得価額", "600000"),
+        ("耐用年数", "5"),
+        ("年間稼働時間", "1000"),
+        ("時間当たり運転費", "30"),
+    ]);
+    click(h, ID_G_NEW)?;
+    select(ID_G_LIST, 0)?;
+    check(
+        cell(handle(ID_G_LIST)?, 0, 6) == "150" && rows(ID_G_DETAIL)? >= 5,
+        "設備の時間当たり費用150と償却予定",
+        log,
+    )?;
+    select(ID_G_DETAIL, 0)?;
+    click(h, ID_G_FIRST)?;
+    check(
+        entries()?
+            .iter()
+            .any(|e| e.source.starts_with("depreciation:"))
+            && cell(handle(ID_G_DETAIL)?, 0, 4) == "計上済",
+        "選んだ年度の減価償却を計上",
+        log,
+    )?;
+    choose(h, ID_G_VIEW, "製品")?;
+    fill(&[
+        ("名前", "食パン"),
+        ("単位", "斤"),
+        ("1単位の作業時間", "0.5"),
+        ("時間当たり賃率", "1000"),
+        ("間接費配賦率（%）", "10"),
+    ]);
+    click(h, ID_G_NEW)?;
+    select(ID_G_LIST, 0)?;
+    fill(&[("原材料", "小麦粉"), ("数量（0で外す）", "0.5")]);
+    click(h, ID_G_FIRST)?;
+    fill(&[("設備", "オーブン"), ("時間（0で外す）", "0.1")]);
+    click(h, ID_G_SECOND)?;
+    // 材料 0.5×200＝100、設備 0.1×150＝15、労務 500、間接費 10%＝61.5→62（四捨五入）
+    check(
+        cell(handle(ID_G_LIST)?, 0, 6) == "677" && rows(ID_G_DETAIL)? == 5,
+        "製品の構成（材料・設備時間）から標準原価677",
+        log,
+    )?;
+    choose(h, ID_G_VIEW, "製造実績")?;
+    fill(&[
+        ("製品", "食パン"),
+        ("数量", "20"),
+        ("作業時間（合計）", "10"),
+    ]);
+    click(h, ID_G_NEW)?;
+    check(
+        rows(ID_G_LIST)? == 1,
+        "製造実績を登録して原価差異を表示",
+        log,
+    )?;
+    choose(h, ID_G_VIEW, "原材料")?;
+    check(
+        cell(handle(ID_G_LIST)?, 0, 2) == "0",
+        "製造で小麦粉10kgを払い出し在庫0",
+        log,
+    )?;
+    let household = state(|s| s.books[0].id)?;
+    select_combo(books, household);
+    send(
+        h,
+        WM_COMMAND,
+        (CBN_SELCHANGE as usize) << 16 | ID_BOOK as usize,
+        books.0 as isize,
+    );
+    let left = messages();
+    check(
+        left.is_empty(),
+        &format!("記録の画面で想定外のメッセージなし {left:?}"),
         log,
     )?;
     Ok(())
