@@ -1323,23 +1323,6 @@ pub fn guide(book: &Book, query: &str, account: Option<i64>) -> GuideResult {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn templates_reference_existing_codes_and_have_guides() {
-        for kind in BookKind::ALL {
-            let list = accounts(kind);
-            assert!(list.iter().all(|a| a.guide.chars().count() > 20));
-            for d in distinctions(kind) {
-                for c in d.codes.iter().chain(d.examples.iter().map(|(_, c)| c)) {
-                    assert!(list.iter().any(|a| a.code == *c), "{kind:?} {c}");
-                }
-            }
-        }
-    }
-}
-
 /// User documentation of both charts, generated so that it never drifts from the guides.
 pub fn markdown() -> String {
     let mut out = String::from(
@@ -1387,4 +1370,21 @@ pub fn markdown() -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn templates_reference_existing_codes_and_have_guides() {
+        for kind in BookKind::ALL {
+            let list = accounts(kind);
+            assert!(list.iter().all(|a| a.guide.chars().count() > 20));
+            for d in distinctions(kind) {
+                for c in d.codes.iter().chain(d.examples.iter().map(|(_, c)| c)) {
+                    assert!(list.iter().any(|a| a.code == *c), "{kind:?} {c}");
+                }
+            }
+        }
+    }
 }

@@ -4,10 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
+default-run = "yyaccountant"
 
 [[bin]]
 name = "yyaccountant"
 path = "src/main.rs"
+
+[[bin]]
+name = "yyaccountantw"
+path = "src/gui_main.rs"
 
 [dependencies]
 yy-accountant.workspace = true
@@ -22,6 +28,9 @@ sha2 = "0.11"
 subtle = "2.6"
 toml = "1"
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile.workspace = true

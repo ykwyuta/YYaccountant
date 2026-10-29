@@ -7,8 +7,9 @@
 | `yyaccountant --web` | パスワード認証のWeb UI（Linux／Windows） |
 | `yyaccountant --mcp` | stdio MCPサーバー（Linux／Windows） |
 | `--init-demo` `--backup` `--generate-password` | 補助コマンド |
+| `yyaccountantw` | Windowsネイティブ画面（かんたん入力・仕訳帳・仕訳入力・帳票、帳簿の作成と設定、バックアップ、仕訳CSV） |
 
-YYprojectにあるWindowsネイティブGUI（`yy-ui-win`）、Streamable HTTP MCP、PostgreSQLはこの版では提供しません。データは要件どおり1つのSQLiteファイルにまとめています。
+ネイティブ画面は標準のWin32コントロールだけで作り、YYprojectが使うyyeditorの `yy-ui-win`（Direct2D描画の表・エディター）には依存しません。債権債務・予算・計画・原価・統計・科目と取引先の編集はWeb UIとMCPだけにあります。Streamable HTTP MCP、PostgreSQLはこの版では提供しません。データは要件どおり1つのSQLiteファイルにまとめています。
 
 ## 構成
 
@@ -32,6 +33,12 @@ app/src
   auth.rs      パスワード（SHA-256ダイジェストだけ保存）
   demo.rs      決定的なデモデータ
   web/         埋め込みのHTML・CSS・JavaScript
+  gui_main.rs  yyaccountantw（windows_subsystem、エラーはメッセージボックス）
+  native.rs    ウィンドウ・メニュー・ページの配置・コマンド・定期読み込み
+  native/sheets.rs  表と見出しの中身（十進数のまま整形、窓なしで試験）
+  native/form.rs    帳簿の作成・設定に使う小さなモーダルフォーム
+  native/smoke.rs   --ui-smoke-test の自己検証
+app/build.rs   Windowsマニフェスト（コモンコントロールv6、PerMonitorV2）とアイコンの埋め込み
 ```
 
 ## 十進数
@@ -76,6 +83,19 @@ app/src
 
 `/` と `/web/*` だけを公開する。Hostの許可リスト、POSTのOrigin一致とContent-Type、ログイン後のHttpOnly・SameSite=Strictクッキーと `X-YY-CSRF` を検査する。CSPは `default-src 'self'`（インラインのスクリプト・スタイル不可）。`/web/api` は `{tool, arguments}` を受け取り `mcp::call` を呼ぶ。変更系（`book_create` `book_change`）は読み取り専用ユーザーを拒否し、`actor` をログインユーザー名で上書きする。ログイン失敗は1分30回で制限する。
 
+## ネイティブ画面
+
+`app/src/native.rs` は全ページのコントロールを起動時に1度作り、ページの切り替えでは表示・非表示だけを変える。タブコントロールは見出しとして使い、コントロールはその下にフレームの子として置く（通知がフレームに届く）。状態は `thread_local` の `State` にあり、メッセージ処理は `try_borrow_mut` で取得する。処理中のコントロール更新が同期的に送る通知（`EN_CHANGE`・`LVN_ITEMCHANGED` など）はこれで無視される。メッセージボックスやファイル選択・フォームは状態を借りていない所で開く。
+
+- 計算と検証はcoreのまま。金額の入力は `num::parse`（全角・桁区切り・円を受け付け、指数表記は拒否）、表示は `num::fixed` の結果に桁区切りを付けるだけで浮動小数点を使わない。
+- 変更は画面に表示している版を `expected_revision` として `Store::apply` に渡す。`Error::Conflict` なら帳簿を読み込み直し、入力欄を残したまま知らせる。
+- 1秒ごとに `PRAGMA data_version` を調べ、他の接続（MCP・Web UI・別のウィンドウ）が書き込んでいれば帳簿の一覧と版を比べて読み込み直す。自分の書き込みでは値が変わらない。
+- 操作者は `USERNAME`（Windows）。読み取り専用で開くと書き込むボタンと帳簿メニューを無効にする。
+- DPIはPerMonitorV2。寸法は96DPI基準の値を `GetDpiForWindow` で拡大し、`WM_DPICHANGED` でフォントと一覧の列幅を作り直す。最小サイズは860×600（96DPI換算）。
+- 各入力欄の直前に静的テキストを作るので、スクリーンリーダーとUI Automationは見出しを入力欄の名前として読む。Tab移動は `IsDialogMessageW`、ページ切り替えとF5はアクセラレーター。
+
+`yyaccountantw --ui-smoke-test DIR` は新しい `DIR/ui-test.sqlite3` に対して、実際のウィンドウへメッセージを送って操作する: 帳簿作成フォーム、貸借不一致の拒否と複合仕訳、全角金額のかんたん入力、JPYの小数の拒否、科目検索と使い分けの表示、取消・解除・検索、同じ番号での修正、別接続の変更の自動読み込みと古い版の保存の競合、4種類の帳票（試算表・貸借対照表の一致と元帳残高）、帳簿の設定、バックアップとCSV、個人事業主の事業割合、帳簿の切り替え、最小と大きいサイズでの全ページの配置（はみ出しと重なり）、DPI変更、読み取り専用。結果を `DIR/ui-smoke.txt`、画面を `DIR/page1〜4.bmp` に書き、失敗時は `DIR/error.txt` に理由を書いて終了コード1で終わる。確認のためのメッセージボックスは出さず記録する。
+
 ## 検証
 
 ```sh
@@ -85,11 +105,13 @@ cargo test --workspace --locked
 cargo build --workspace --release --locked
 python tools/test_mcp.py target/release/yyaccountant
 NODE_PATH=... python tools/test_web.py target/release/yyaccountant --browser
+python tools/test_native.py target/release/yyaccountantw.exe   # Windowsのみ
 ```
 
 - `core/tests/books.rs`: 十進数の保存（SQLiteの型がtext）、貸借不一致・桁超過・JSON小数の拒否、競合と監査、取消とIDの非再利用、家事按分と財務諸表、返済予定（元利均等の検算）と延滞、年度予算、計画の二重計上防止と予測、原価（移動平均・償却・標準原価・差異の手計算値）、科目検索。
 - `core/tests/docs.rs`: `docs/user/accounts.md` が科目表から生成した内容と一致すること。
 - `tools/test_mcp.py`: 実プロセスのstdioで全体を操作し、デモDBの貸借一致・予測・延滞・原価を確認。
+- `tools/test_native.py`: `--ui-smoke-test` を実プロセスで終了まで待って実行し、作られたSQLiteを別に読んで、金額の列が全行 `text`、取消していない仕訳が十進数で貸借一致、監査の操作者と操作の種類、修正した仕訳の番号を確認する。結果と画面（PNG）を `target/native-validation/` に残す。
 - `tools/test_web.py`: 実サーバーでHost/Origin/CSRF/読み取り専用/競合/監査/バックアップを確認。`--browser` でChromiumを使い、両帳簿の全画面、科目検索からの入力と家事按分、明細3行の仕訳（JPYの小数を拒否→修正して保存）、グラフのツールチップ、ダーク表示、スマートフォン幅の横はみ出しを確認し、コンソールエラー（CSP違反を含む）があれば失敗する。画面は `target/web-validation/` に保存する。
 
 デモDB `demo/yyaccountant-demo.sqlite3` は `yyaccountant --init-demo demo/yyaccountant-demo.sqlite3 --today 2026-10-29` で再生成できる（乱数を使わず決定的）。
