@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  accountant:
+    name: YYaccountant (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: yyaccountant-${{ matrix.os }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo build --workspace --release --locked
+      - name: MCP over real stdin/stdout
+        shell: bash
+        run: |
+          EXE=target/release/yyaccountant
+          if [ "$RUNNER_OS" = Windows ]; then EXE="$EXE.exe"; fi
+          python tools/test_mcp.py "$EXE"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Password Web UI and real browser interactions
+        shell: bash
+        run: |
+          npm install --prefix target/web-browser --no-save --no-audit --no-fund playwright@1.62.1
+          node target/web-browser/node_modules/playwright/cli.js install --with-deps chromium
+          EXE=target/release/yyaccountant
+          if [ "$RUNNER_OS" = Windows ]; then
+            EXE="$EXE.exe"
+            export NODE_PATH="$(cygpath -w "$PWD/target/web-browser/node_modules")"
+          else
+            export NODE_PATH="$PWD/target/web-browser/node_modules"
+          fi
+          python tools/test_web.py "$EXE" --browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: yyaccountant-web-${{ runner.os }}
+          path: target/web-validation/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yyaccountant-${{ runner.os }}-x64
+          path: |
+            target/release/yyaccountant
+            target/release/yyaccountant.exe
+            help/help.md
+            COPYING
+            NOTICE.md
+          if-no-files-found: warn

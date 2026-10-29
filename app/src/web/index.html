@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>YYaccountant</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/web/app.css" />
+    <script src="/web/app.js" defer></script>
+  </head>
+  <body>
+    <section id="login" class="login" hidden>
+      <form id="login-form">
+        <div class="brand">YY<span>accountant</span></div>
+        <h1>帳簿にログイン</h1>
+        <label for="password">ユーザーのパスワード</label>
+        <input id="password" type="password" autocomplete="current-password" required autofocus />
+        <button type="submit" class="primary">ログイン</button>
+        <p id="login-error" role="alert"></p>
+      </form>
+    </section>
+    <div id="app" hidden>
+      <header class="top">
+        <div class="brand">YY<span>accountant</span></div>
+        <label class="book-label">帳簿<select id="books" aria-label="帳簿"></select></label>
+        <button id="new-book">新規帳簿</button>
+        <button id="book-settings">帳簿設定</button>
+        <span class="spacer"></span>
+        <span id="user" class="muted"></span>
+        <button id="logout">ログアウト</button>
+      </header>
+      <div class="layout">
+        <nav id="views" aria-label="画面"></nav>
+        <main>
+          <div class="heading">
+            <div>
+              <span id="book-kind" class="eyebrow"></span>
+              <h1 id="view-title"></h1>
+            </div>
+            <span id="revision" class="muted"></span>
+          </div>
+          <div id="message" role="status" hidden></div>
+          <div id="surface"></div>
+        </main>
+      </div>
+    </div>
+    <div id="tooltip" class="tooltip" hidden></div>
+    <div id="modal-host"></div>
+  </body>
+</html>

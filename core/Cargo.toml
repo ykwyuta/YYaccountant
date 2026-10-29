@@ -1,0 +1,18 @@
+[package]
+name = "yy-accountant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+rust_decimal.workspace = true
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+tempfile.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
