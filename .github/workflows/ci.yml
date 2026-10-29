@@ -43,6 +43,14 @@ jobs:
           EXE=target/release/yyaccountant
           if [ "$RUNNER_OS" = Windows ]; then EXE="$EXE.exe"; fi
           python tools/test_mcp.py "$EXE"
+      - name: Native Windows UI (real window, forms, layout, DPI)
+        if: runner.os == 'Windows'
+        run: python tools/test_native.py target/release/yyaccountantw.exe
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: yyaccountant-native-${{ runner.os }}
+          path: target/native-validation/
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -70,6 +78,7 @@ jobs:
           path: |
             target/release/yyaccountant
             target/release/yyaccountant.exe
+            target/release/yyaccountantw.exe
             help/help.md
             COPYING
             NOTICE.md

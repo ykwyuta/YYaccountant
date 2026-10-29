@@ -15,6 +15,9 @@ yyaccountant --mcp books.sqlite3 [--read-only]
 # デモ（家計と個人事業主のパン工房、約18か月分）
 yyaccountant --init-demo NEW_DATABASE [--today YYYY-MM-DD]
 
+# Windowsのネイティブ画面（ファイルを省略すると %LOCALAPPDATA%\YYaccountant\books.sqlite3）
+yyaccountantw [books.sqlite3] [--read-only]
+
 # バックアップ（一貫したコピーを新しいファイルに作成）
 yyaccountant --backup books.sqlite3 NEW_FILE
 ```

@@ -1,6 +1,6 @@
 # YYaccountant
 
-個人の家計から個人事業主の財務管理までを扱うRustアプリです。収入と支出、債権と債務、予算と計画、複数の原材料や設備を使う製品の原価、各種統計に基づく今後の支出予想を、**1つのSQLiteファイル**で管理します。Linux／Windows向けに、パスワード認証のWeb UIと、AIから操作するstdio MCPサーバーを1つの実行ファイル `yyaccountant` で提供します。
+個人の家計から個人事業主の財務管理までを扱うRustアプリです。収入と支出、債権と債務、予算と計画、複数の原材料や設備を使う製品の原価、各種統計に基づく今後の支出予想を、**1つのSQLiteファイル**で管理します。Linux／Windows向けに、パスワード認証のWeb UIと、AIから操作するstdio MCPサーバーを1つの実行ファイル `yyaccountant` で、Windows向けのネイティブ画面を `yyaccountantw` で提供します。
 
 - **十進数だけで計算**: 金額・数量・単価・率・統計（平均、標準偏差、回帰、予測）はすべて `rust_decimal` で計算し、SQLiteにもTEXTで保存します。JSONでは文字列で受け渡し、浮動小数点の数値は拒否します。通貨ごとの小数桁と端数処理（四捨五入・切り捨て・切り上げ・銀行丸め）を帳簿ごとに設定できます。
 - **複式簿記**: すべての取引は借方と貸方が一致する仕訳として記録します。「支出・収入・振替」のかんたん入力は内部で仕訳になり、個人事業主の家事按分（事業割合）は事業主貸へ自動で分けます。試算表・損益計算書・貸借対照表・総勘定元帳・仕訳CSVを出力します。
@@ -16,6 +16,7 @@ cargo build --workspace --release --locked
 ./target/release/yyaccountant --generate-password me
 ./target/release/yyaccountant --web demo/yyaccountant-demo.sqlite3   # http://127.0.0.1:8750/
 ./target/release/yyaccountant --mcp books.sqlite3                      # AI用（stdio）
+./target/release/yyaccountantw books.sqlite3                        # Windowsのネイティブ画面
 ```
 
 `demo/yyaccountant-demo.sqlite3` には、家計（給与・カード払い・家賃・自動車ローン・NISA積立・予算）と個人事業主のパン工房（原材料3種・設備2台・製品2種・製造実績・借入金・卸の売掛金・減価償却）の約18か月分を同梱しています。新しい日付のデモは `yyaccountant --init-demo NEW_DATABASE` で作成できます。
@@ -24,6 +25,6 @@ cargo build --workspace --release --locked
 - [開発・内部仕様・検証](docs/developer/yyaccountant.md)
 - [検討経緯・検証記録](docs/history/README.md)
 
-[YYproject](https://github.com/ykwyuta/yyproject) の構成（core／appのCargoワークスペース、SQLiteの版管理と監査、stdio MCP、パスワード認証Web UI）を参考にしています。Windows専用のネイティブGUIはこの版にはありません（[開発文書](docs/developer/yyaccountant.md#範囲)）。勘定科目の説明は一般的な記帳の考え方で、個別の税務判断に代わるものではありません。
+[YYproject](https://github.com/ykwyuta/yyproject) の構成（core／appのCargoワークスペース、SQLiteの版管理と監査、stdio MCP、パスワード認証Web UI、`yyprojectw` 形式のWindowsネイティブ画面）を参考にしています。ネイティブ画面は記帳・仕訳帳・帳票に絞っており、債権債務・予算・計画・原価・統計はWeb UIかMCPで扱います（[開発文書](docs/developer/yyaccountant.md#範囲)）。勘定科目の説明は一般的な記帳の考え方で、個別の税務判断に代わるものではありません。
 
 本体のライセンスは [GPL-3.0-or-later](COPYING) です。[素材・依存の案内](NOTICE.md)も参照してください。
