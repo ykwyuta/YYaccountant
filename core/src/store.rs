@@ -18,7 +18,9 @@ use std::path::Path;
 use std::time::Duration;
 
 const APPLICATION_ID: i64 = 0x5959_4143; // "YYAC"
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
+/// Tables added in version 2; a version 1 file gets them when opened for writing.
+const SINCE_V2: &[&str] = &["tax_returns", "life_plans"];
 
 struct Child {
     field: &'static str,
@@ -189,6 +191,92 @@ const SPECS: &[Spec] = &[
             },
         ],
     },
+    Spec {
+        field: "tax_returns",
+        table: "tax_returns",
+        columns: &[
+            "year:i",
+            "name",
+            "memo",
+            "salary",
+            "salary_withheld",
+            "social_insurance",
+            "side_kind",
+            "side_revenue",
+            "side_expenses",
+            "side_withheld",
+            "blue_deduction",
+            "self_disability",
+            "has_spouse:b",
+            "spouse_income",
+            "spouse_birth_year:i",
+            "spouse_disability",
+            "mutual_aid",
+            "life_general_new",
+            "life_general_old",
+            "life_care",
+            "life_pension_new",
+            "life_pension_old",
+            "earthquake",
+            "medical_paid",
+            "medical_covered",
+            "self_medication",
+            "donation",
+            "housing_balance",
+            "housing_limit",
+            "housing_rate",
+            "housing_resident_cap",
+            "per_capita",
+        ],
+        children: &[Child {
+            field: "dependents",
+            table: "tax_dependents",
+            columns: &[
+                "name",
+                "relation",
+                "birth_year:i",
+                "income",
+                "cohabiting:b",
+                "disability",
+            ],
+        }],
+    },
+    Spec {
+        field: "life_plans",
+        table: "life_plans",
+        columns: &[
+            "name",
+            "memo",
+            "start_year:i",
+            "years:i",
+            "savings",
+            "return_percent",
+        ],
+        children: &[
+            Child {
+                field: "members",
+                table: "life_plan_members",
+                columns: &["name", "relation", "birth_year:i"],
+            },
+            Child {
+                field: "flows",
+                table: "life_plan_flows",
+                columns: &[
+                    "name",
+                    "kind",
+                    "amount",
+                    "start_year:i",
+                    "end_year:i",
+                    "growth_percent",
+                ],
+            },
+            Child {
+                field: "events",
+                table: "life_plan_events",
+                columns: &["year:i", "name", "kind", "amount", "growth_percent"],
+            },
+        ],
+    },
 ];
 const BOOK_COLUMNS: &[&str] = &[
     "name",
@@ -219,7 +307,13 @@ fn schema() -> String {
          CREATE TABLE audit(id INTEGER PRIMARY KEY,book_id INTEGER NOT NULL REFERENCES books(id),at TEXT NOT NULL,actor TEXT NOT NULL,revision INTEGER NOT NULL,change TEXT NOT NULL CHECK(json_valid(change)));\
          CREATE INDEX audit_book ON audit(book_id,id);",
     );
-    for s in SPECS {
+    sql += &tables(|_| true);
+    sql += "CREATE INDEX entries_date ON entries(book_id,date);CREATE INDEX entry_lines_account ON entry_lines(book_id,account);";
+    sql
+}
+fn tables(include: impl Fn(&Spec) -> bool) -> String {
+    let mut sql = String::new();
+    for s in SPECS.iter().filter(|s| include(s)) {
         let cols: Vec<String> = s
             .columns
             .iter()
@@ -250,7 +344,6 @@ fn schema() -> String {
             );
         }
     }
-    sql += "CREATE INDEX entries_date ON entries(book_id,date);CREATE INDEX entry_lines_account ON entry_lines(book_id,account);";
     sql
 }
 
@@ -321,7 +414,8 @@ fn read_rows(
     Ok(out)
 }
 
-fn load(c: &Connection, id: i64) -> Result<Book> {
+/// `v1` skips the tables a read-only version 1 file does not have yet.
+fn load(c: &Connection, id: i64, v1: bool) -> Result<Book> {
     let cols: Vec<String> = BOOK_COLUMNS
         .iter()
         .map(|c| split(c).0.to_string())
@@ -341,6 +435,10 @@ fn load(c: &Connection, id: i64) -> Result<Book> {
         book.insert(n.into(), from_sql(v, t)?);
     }
     for s in SPECS {
+        if v1 && SINCE_V2.contains(&s.table) {
+            book.insert(s.field.into(), Value::Array(vec![]));
+            continue;
+        }
         let mut items: Vec<(i64, Map<String, Value>)> = read_rows(c, s.table, "id", s.columns, id)?;
         for ch in s.children {
             let mut grouped: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
@@ -528,6 +626,8 @@ pub struct Applied {
 pub struct Store {
     connection: Connection,
     read_only: bool,
+    /// A version 1 file opened read-only (no tax or life plan tables).
+    v1: bool,
 }
 fn actor_ok(actor: &str) -> Result<()> {
     if actor.trim().is_empty() || actor.len() > 256 || actor.chars().any(char::is_control) {
@@ -562,15 +662,22 @@ impl Store {
                 "BEGIN IMMEDIATE;{}PRAGMA application_id={APPLICATION_ID};PRAGMA user_version={VERSION};COMMIT;",
                 schema()
             ))?;
-        } else if application != APPLICATION_ID || version != VERSION {
+        } else if application == APPLICATION_ID && version == 1 && !read_only {
+            c.execute_batch(&format!(
+                "BEGIN IMMEDIATE;{}PRAGMA user_version={VERSION};COMMIT;",
+                tables(|s| SINCE_V2.contains(&s.table))
+            ))?;
+        } else if application != APPLICATION_ID || !(version == VERSION || version == 1) {
             return Err(invalid("対応していないデータベース形式です"));
         }
+        let v1 = version == 1 && read_only;
         if !read_only {
             c.pragma_update(None, "journal_mode", "WAL")?;
         }
         Ok(Self {
             connection: c,
             read_only,
+            v1,
         })
     }
     pub fn read_only(&self) -> bool {
@@ -602,7 +709,7 @@ impl Store {
     }
     pub fn get(&mut self, id: i64) -> Result<Book> {
         let tx = self.connection.transaction()?;
-        let book = load(&tx, id)?;
+        let book = load(&tx, id, self.v1)?;
         tx.commit()?;
         Ok(book)
     }
@@ -643,6 +750,8 @@ impl Store {
             equipment: vec![],
             products: vec![],
             productions: vec![],
+            tax_returns: vec![],
+            life_plans: vec![],
         };
         book.validate()?;
         write(&tx, None, &book)?;
@@ -673,7 +782,7 @@ impl Store {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let old = load(&tx, id)?;
+        let old = load(&tx, id, false)?;
         if old.revision != expected_revision {
             return Err(Error::Conflict);
         }

@@ -531,6 +531,12 @@ pub struct Book {
     pub products: Vec<Product>,
     #[serde(default)]
     pub productions: Vec<Production>,
+    /// 年分ごとの所得税・住民税の試算の入力
+    #[serde(default)]
+    pub tax_returns: Vec<crate::tax::TaxReturn>,
+    /// ライフプラン（キャッシュフロー表）
+    #[serde(default)]
+    pub life_plans: Vec<crate::lifeplan::LifePlan>,
 }
 
 pub(crate) fn text(value: &str, what: &str, max: usize, required: bool) -> Result<()> {
@@ -927,6 +933,14 @@ impl Book {
                 nonneg(m.quantity, "消費量")?;
             }
             uses(&p.equipment)?;
+        }
+        unique_ids(self.tax_returns.iter().map(|t| &t.id), "税額計算")?;
+        for t in &self.tax_returns {
+            crate::tax::validate(self, t)?;
+        }
+        unique_ids(self.life_plans.iter().map(|p| &p.id), "ライフプラン")?;
+        for p in &self.life_plans {
+            crate::lifeplan::validate(self, p)?;
         }
         Ok(())
     }

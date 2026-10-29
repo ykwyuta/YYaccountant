@@ -16,13 +16,16 @@ use windows::{
 };
 use yy_accountant::{
     Book, BookInfo, BookKind, Change, Entry, Error as CoreError, Line, NewBook, QuickEntry,
-    QuickKind, Store, num::Rounding, reports,
+    QuickKind, Store, lifeplan, num::Rounding, reports, tutorial,
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod form;
+mod planning;
+mod records;
 mod sheets;
 mod smoke;
 use form::Field;
+use records::{Act, Prepared, Section};
 use sheets::Table;
 
 thread_local! {static APP:RefCell<Option<State>>=const{RefCell::new(None)};}
@@ -32,7 +35,23 @@ thread_local! {static SMOKE_FILE:RefCell<Option<PathBuf>>=const{RefCell::new(Non
 // Lets the smoke test go below the minimum size, as a small screen at a high scale does.
 thread_local! {static SMOKE_MIN_SIZE:std::cell::Cell<Option<(i32,i32)>>=const{std::cell::Cell::new(None)};}
 
-const PAGES: [&str; 4] = ["かんたん入力", "仕訳帳", "仕訳入力", "帳票"];
+const PAGES: [&str; 13] = [
+    "かんたん入力",
+    "仕訳帳",
+    "仕訳入力",
+    "帳票",
+    "勘定科目・取引先",
+    "債権・債務",
+    "予算",
+    "計画",
+    "原価管理",
+    "統計・予測",
+    "税金",
+    "ライフプラン",
+    "変更履歴",
+];
+/// Pages from here on are record pages (`records::GROUPS`) sharing one set of controls.
+const RECORDS: usize = 4;
 const KINDS: [QuickKind; 3] = [QuickKind::Expense, QuickKind::Income, QuickKind::Transfer];
 /// A static label for a field has the field's ID plus this offset.
 const LABEL: u16 = 1000;
@@ -47,12 +66,15 @@ const ID_DEMO: u16 = 13;
 const ID_BACKUP: u16 = 14;
 const ID_CSV: u16 = 15;
 const ID_EXIT: u16 = 16;
+const ID_PLAN_CSV: u16 = 17;
 const ID_NEW_BOOK: u16 = 20;
 const ID_SETTINGS: u16 = 21;
 const ID_REFRESH: u16 = 22;
 const ID_ABOUT: u16 = 30;
 const ID_NEXT_PAGE: u16 = 31;
 const ID_PREV_PAGE: u16 = 32;
+const ID_TUTORIAL: u16 = 33;
+const ID_COEFFICIENTS: u16 = 34;
 const ID_PAGE: u16 = 40;
 
 const ID_BOOK: u16 = 100;
@@ -106,14 +128,37 @@ const ID_R_ACCOUNT: u16 = 503;
 const ID_R_LIST: u16 = 504;
 const ID_R_SUMMARY: u16 = 505;
 
+const ID_G_VIEW: u16 = 600;
+const ID_G_FROM: u16 = 601;
+const ID_G_TO: u16 = 602;
+const ID_G_FLAG: u16 = 603;
+const ID_G_LIST: u16 = 604;
+const ID_G_DETAIL: u16 = 605;
+const ID_G_SUMMARY: u16 = 606;
+const ID_G_NEW: u16 = 607;
+const ID_G_EDIT: u16 = 608;
+const ID_G_REMOVE: u16 = 609;
+const ID_G_FIRST: u16 = 610;
+const ID_G_SECOND: u16 = 611;
+const RECORD_BUTTONS: [(u16, Act); 5] = [
+    (ID_G_NEW, Act::New),
+    (ID_G_EDIT, Act::Edit),
+    (ID_G_REMOVE, Act::Remove),
+    (ID_G_FIRST, Act::First),
+    (ID_G_SECOND, Act::Second),
+];
+
 /// Menu commands that ask for input (a file or a form) before using the state.
-const DIALOGS: [u16; 10] = [
+const DIALOGS: [u16; 13] = [
     ID_OPEN,
     ID_OPEN_READ_ONLY,
     ID_NEW_DATABASE,
     ID_DEMO,
     ID_BACKUP,
     ID_CSV,
+    ID_PLAN_CSV,
+    ID_TUTORIAL,
+    ID_COEFFICIENTS,
     ID_EXIT,
     ID_NEW_BOOK,
     ID_SETTINGS,
@@ -159,7 +204,7 @@ struct State {
     book: Option<Book>,
     page: usize,
     controls: BTreeMap<u16, Control>,
-    headings: BTreeMap<u16, Vec<&'static str>>,
+    headings: BTreeMap<u16, Vec<String>>,
     /// Lines of the compound entry being written.
     draft: Vec<Line>,
     /// Draft line loaded for correction.
@@ -168,6 +213,8 @@ struct State {
     editing: Option<Entry>,
     version: i64,
     note: String,
+    /// Chosen view (section index, or budget ID) per record page.
+    views: BTreeMap<usize, i64>,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -426,6 +473,9 @@ impl State {
             && self.quick_kind() == QuickKind::Expense
     }
     fn wanted(&self, id: u16, page: Option<usize>) -> bool {
+        if page == Some(RECORDS) {
+            return self.page >= RECORDS && self.record_control_used(id);
+        }
         let ratio = id == ID_Q_RATIO || id == ID_Q_RATIO + LABEL;
         page.is_none_or(|p| p == self.page) && (!ratio || self.ratio_applies())
     }
@@ -448,7 +498,13 @@ impl State {
         send(self.tabs, TCM_SETCURSEL, self.page, 0);
         self.update_visibility();
         self.layout();
-        let first = [ID_Q_AMOUNT, ID_J_QUERY, ID_E_ACCOUNT, ID_R_KIND][self.page];
+        if self.page >= RECORDS {
+            self.setup_records(true);
+        }
+        let first = [ID_Q_AMOUNT, ID_J_QUERY, ID_E_ACCOUNT, ID_R_KIND]
+            .get(self.page)
+            .copied()
+            .unwrap_or(ID_G_LIST);
         unsafe {
             let _ = SetFocus(Some(self.c(first)));
         }
@@ -456,7 +512,7 @@ impl State {
     fn fill_table(&mut self, id: u16, table: &Table, keep: Option<i64>) {
         let h = self.c(id);
         send(h, WM_SETREDRAW, 0, 0);
-        let headings: Vec<&'static str> = table.columns.iter().map(|c| c.0).collect();
+        let headings: Vec<String> = table.columns.iter().map(|c| c.0.clone()).collect();
         if self.headings.get(&id) != Some(&headings) {
             while send(h, LVM_DELETECOLUMN, 0, 0).0 != 0 {}
             for (i, (title, width, align)) in table.columns.iter().enumerate() {
@@ -588,6 +644,9 @@ impl State {
         self.refresh_draft();
         self.refresh_report();
         self.refresh_guide();
+        if self.page >= RECORDS {
+            self.setup_records(false);
+        }
         self.update_visibility();
         self.layout();
         self.update_status();
@@ -1260,7 +1319,7 @@ impl State {
                 );
                 self.place(ID_E_SAVE, right - save, buttons, save, self.px(32));
             }
-            _ => {
+            3 => {
                 // The account takes what is left only up to its preferred width.
                 self.row(
                     x,
@@ -1283,7 +1342,238 @@ impl State {
                 );
                 self.place(ID_R_SUMMARY, x, summary, width, self.px(28));
             }
+            _ => self.layout_records(x, top, right, bottom),
         }
+    }
+
+    // ----- record pages -----
+    fn group(&self) -> &'static [Section] {
+        records::GROUPS[self
+            .page
+            .saturating_sub(RECORDS)
+            .min(records::GROUPS.len() - 1)]
+        .1
+    }
+    fn section(&self) -> Section {
+        let group = self.group();
+        if let [only] = group
+            && only.chooser().is_some()
+        {
+            return *only;
+        }
+        let index = self.views.get(&self.page).copied().unwrap_or(0) as usize;
+        group[index.min(group.len() - 1)]
+    }
+    fn record_control_used(&self, id: u16) -> bool {
+        let spec = self.section().spec();
+        let field = if id > LABEL { id - LABEL } else { id };
+        match field {
+            ID_G_VIEW => self.group().len() > 1 || self.section().chooser().is_some(),
+            ID_G_FROM => spec.from.is_some(),
+            ID_G_TO => spec.to,
+            ID_G_FLAG => spec.flag.is_some(),
+            ID_G_DETAIL => spec.detail,
+            ID_G_NEW => spec.new.is_some(),
+            ID_G_EDIT => spec.edit.is_some(),
+            ID_G_REMOVE => spec.remove.is_some(),
+            ID_G_FIRST => spec.first.is_some(),
+            ID_G_SECOND => spec.second.is_some(),
+            _ => true,
+        }
+    }
+    /// Prepares the shared controls for the current record page; `reset` also restores
+    /// the default dates (when the page or its view changes).
+    fn setup_records(&mut self, reset: bool) {
+        let section = self.section();
+        let view = self.c(ID_G_VIEW);
+        let chooser = section.chooser();
+        let items: Vec<(i64, String)> = if chooser.is_some() {
+            self.book
+                .as_ref()
+                .map(|b| section.choices(b))
+                .unwrap_or_default()
+        } else {
+            self.group()
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (i as i64, s.title().to_string()))
+                .collect()
+        };
+        let keep = self.views.get(&self.page).copied();
+        fill_combo(view, &items, keep);
+        if chooser.is_some() {
+            match combo_value(view) {
+                Some(v) => self.views.insert(self.page, v),
+                None => self.views.remove(&self.page),
+            };
+        }
+        set_text(self.c(ID_G_VIEW + LABEL), chooser.unwrap_or("表示"));
+        let spec = section.spec();
+        set_text(self.c(ID_G_FROM + LABEL), spec.from.unwrap_or(""));
+        set_text(self.c(ID_G_FLAG), spec.flag.unwrap_or(""));
+        for (id, label) in [
+            (ID_G_NEW, spec.new),
+            (ID_G_EDIT, spec.edit),
+            (ID_G_REMOVE, spec.remove),
+            (ID_G_FIRST, spec.first),
+            (ID_G_SECOND, spec.second),
+        ] {
+            set_text(self.c(id), label.unwrap_or(""));
+            unsafe {
+                let _ = EnableWindow(self.c(id), !self.read_only && self.book.is_some());
+            }
+        }
+        if reset {
+            let (from, to) = section.dates(today());
+            set_date(self.c(ID_G_FROM), Some(from));
+            set_date(self.c(ID_G_TO), Some(to));
+            select_row(self.c(ID_G_LIST), None);
+        }
+        self.update_visibility();
+        self.layout();
+        self.refresh_records();
+    }
+    fn record_context(&self) -> records::Context {
+        let chosen = self
+            .section()
+            .chooser()
+            .and_then(|_| combo_value(self.c(ID_G_VIEW)));
+        records::Context {
+            today: today(),
+            from: get_date(self.c(ID_G_FROM)),
+            to: get_date(self.c(ID_G_TO)),
+            flag: send(self.c(ID_G_FLAG), BM_GETCHECK, 0, 0).0 == BST_CHECKED.0 as isize,
+            chosen,
+            part: None,
+            main: selected_row(self.c(ID_G_LIST)).map(|r| r.1),
+            detail: selected_row(self.c(ID_G_DETAIL)).map(|r| r.1),
+        }
+    }
+    fn record_view(&self) -> Result<records::View> {
+        let book = self.book()?;
+        let section = self.section();
+        let mut audit: Vec<serde_json::Value> = vec![];
+        if section == Section::Audit {
+            loop {
+                let after = audit.last().and_then(|a| a["id"].as_i64()).unwrap_or(0);
+                let page = self.store.audit(book.id, after)?;
+                let done = page.len() < 100;
+                audit.extend(page);
+                if done {
+                    break;
+                }
+            }
+        }
+        records::view(book, section, &self.record_context(), &audit)
+    }
+    fn refresh_records(&mut self) {
+        if self.page < RECORDS {
+            return;
+        }
+        let keep = selected_row(self.c(ID_G_LIST)).map(|r| r.1);
+        let keep_detail = selected_row(self.c(ID_G_DETAIL)).map(|r| r.1);
+        match self.record_view() {
+            Ok(v) => {
+                self.fill_table(ID_G_LIST, &v.main, keep);
+                self.fill_table(ID_G_DETAIL, &v.detail, keep_detail);
+                set_text(self.c(ID_G_SUMMARY), &v.summary);
+                // The selection kept in the main list decides what the detail shows.
+                if keep.is_some() {
+                    self.refresh_records_detail();
+                }
+            }
+            Err(e) => {
+                self.fill_table(ID_G_LIST, &Table::default(), None);
+                self.fill_table(ID_G_DETAIL, &Table::default(), None);
+                set_text(self.c(ID_G_SUMMARY), &e.to_string());
+            }
+        }
+    }
+    fn refresh_records_detail(&mut self) {
+        if let Ok(v) = self.record_view() {
+            let keep = selected_row(self.c(ID_G_DETAIL)).map(|r| r.1);
+            self.fill_table(ID_G_DETAIL, &v.detail, keep);
+            set_text(self.c(ID_G_SUMMARY), &v.summary);
+        }
+    }
+    fn layout_records(&self, x: i32, top: i32, right: i32, bottom: i32) {
+        let used = |id| self.record_control_used(id);
+        let mut items = vec![];
+        for (id, width, flex) in [
+            (ID_G_VIEW, 240, false),
+            (ID_G_FROM, 140, false),
+            (ID_G_TO, 140, false),
+            (ID_G_FLAG, 130, false),
+        ] {
+            if used(id) {
+                items.push((id, width, flex));
+            }
+        }
+        let step = self.px(34);
+        if !items.is_empty() {
+            self.row(x, top, right.min(x + self.px(760)), &items);
+        }
+        let list_top = if items.is_empty() { top } else { top + step };
+        let buttons: Vec<u16> = RECORD_BUTTONS
+            .iter()
+            .map(|b| b.0)
+            .filter(|id| used(*id))
+            .collect();
+        let button_top = if buttons.is_empty() {
+            bottom
+        } else {
+            bottom - self.px(32)
+        };
+        let mut bx = x;
+        for id in &buttons {
+            let label = text(self.c(*id)).chars().count() as i32;
+            let w = self.px(28 + 14 * label).min(right - bx).max(1);
+            self.place(*id, bx, button_top, w, self.px(32));
+            bx += w + self.px(8);
+        }
+        let summary_top = button_top - self.px(36);
+        self.place(ID_G_SUMMARY, x, summary_top, right - x, self.px(32));
+        let width = right - x;
+        let area = summary_top - self.px(6) - list_top;
+        if used(ID_G_DETAIL) {
+            let detail = area * 2 / 5;
+            self.place(ID_G_LIST, x, list_top, width, area - detail - self.px(8));
+            self.place(ID_G_DETAIL, x, list_top + area - detail, width, detail);
+        } else {
+            self.place(ID_G_LIST, x, list_top, width, area);
+        }
+    }
+    fn record_prepare(&self, act: Act) -> Result<(Section, records::Context, Prepared)> {
+        let section = self.section();
+        let cx = self.record_context();
+        let prepared = records::prepare(self.book()?, section, act, &cx)?;
+        Ok((section, cx, prepared))
+    }
+    fn record_finish(
+        &mut self,
+        section: Section,
+        act: Act,
+        cx: &records::Context,
+        values: &[String],
+    ) -> Result<()> {
+        let change = records::finish(self.book()?, section, act, cx, values)?;
+        self.record_apply(section, change)
+    }
+    fn record_apply(&mut self, section: Section, change: Change) -> Result<()> {
+        let created = match &change {
+            Change::SaveBudget { budget } => budget.id == 0,
+            Change::SaveTaxReturn { tax_return } => tax_return.id == 0,
+            Change::SaveLifePlan { life_plan } => life_plan.id == 0,
+            _ => false,
+        };
+        let id = self.apply(change)?;
+        if created && let Some(id) = id {
+            self.views.insert(self.page, id);
+            self.setup_records(false);
+        }
+        self.note = format!("{}を更新しました", section.title());
+        self.update_status();
+        Ok(())
     }
 
     // ----- events -----
@@ -1313,6 +1603,13 @@ impl State {
             (ID_E_CLEAR, BN_CLICKED) => self.entry_clear(),
             (ID_E_SAVE, BN_CLICKED) => self.entry_save()?,
             (ID_R_KIND | ID_R_ACCOUNT, CBN_SELCHANGE) => self.refresh_report(),
+            (ID_G_VIEW, CBN_SELCHANGE) => {
+                if let Some(v) = combo_value(self.c(ID_G_VIEW)) {
+                    self.views.insert(self.page, v);
+                }
+                self.setup_records(true);
+            }
+            (ID_G_FLAG, BN_CLICKED) => self.refresh_records(),
             // Enter in a field: register on the quick page, add the line in the editor.
             (1, _) => match self.page {
                 0 if !self.read_only => self.quick_save()?,
@@ -1345,6 +1642,8 @@ impl State {
             (ID_E_LIST, LVN_ITEMCHANGED) => self.line_selected(),
             (ID_J_FROM | ID_J_TO, DTN_DATETIMECHANGE) => self.refresh_journal(),
             (ID_R_FROM | ID_R_TO, DTN_DATETIMECHANGE) => self.refresh_report(),
+            (ID_G_FROM | ID_G_TO, DTN_DATETIMECHANGE) => self.refresh_records(),
+            (ID_G_LIST, LVN_ITEMCHANGED) => self.refresh_records_detail(),
             _ => {}
         }
     }
@@ -1369,6 +1668,60 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
         let mut a = a.try_borrow_mut().ok()?;
         a.as_mut().map(f)
     })
+}
+/// Yes/No question; the smoke test answers yes.
+fn confirm(h: HWND, question: &str) -> bool {
+    if SMOKE.with(|s| s.get()) {
+        return true;
+    }
+    unsafe {
+        MessageBoxW(
+            Some(h),
+            &HSTRING::from(question),
+            w!("YYaccountant"),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+        ) == IDYES
+    }
+}
+/// A button of a record page: a form or a confirmation first, then the change.
+fn record_action(h: HWND, act: Act) {
+    let (section, mut cx, mut prepared) = match with(|s| s.record_prepare(act)) {
+        Some(Ok(p)) => p,
+        Some(Err(e)) => return message(h, &e.to_string(), true),
+        None => return,
+    };
+    // Two-step forms: choose the part, then prepare that part's form.
+    if let Prepared::Choose(title, label, options) = prepared {
+        let Some(values) = form::show(h, &title, vec![form::Field::Choice(label, options, 0)])
+        else {
+            return;
+        };
+        cx.part = Some(values[0].parse().unwrap_or(0));
+        prepared = match with(|s| {
+            s.book()
+                .and_then(|b| records::prepare(b, section, act, &cx))
+        }) {
+            Some(Ok(p)) => p,
+            Some(Err(e)) => return message(h, &e.to_string(), true),
+            None => return,
+        };
+    }
+    let outcome = match prepared {
+        Prepared::Form(title, fields) => match form::show(h, &title, fields) {
+            Some(values) => with(|s| s.record_finish(section, act, &cx, &values)),
+            None => None,
+        },
+        Prepared::Confirm(question, change) => {
+            if confirm(h, &question) {
+                with(|s| s.record_apply(section, change))
+            } else {
+                None
+            }
+        }
+        Prepared::Apply(change) => with(|s| s.record_apply(section, change)),
+        Prepared::Choose(..) => None,
+    };
+    report(h, outcome);
 }
 fn report(h: HWND, outcome: Option<Result<()>>) {
     if let Some(Err(e)) = outcome {
@@ -1449,6 +1802,68 @@ fn menu_command(h: HWND, id: u16) {
                     Ok(())
                 });
                 report(h, outcome);
+            }
+        }
+        ID_PLAN_CSV => {
+            let plan = with(|s| -> Result<(String, String)> {
+                let book = s.book()?;
+                let id = (s.section() == Section::LifePlan)
+                    .then(|| combo_value(s.c(ID_G_VIEW)))
+                    .flatten()
+                    .or_else(|| book.life_plans.first().map(|p| p.id))
+                    .ok_or("ライフプランがありません")?;
+                let p = book
+                    .life_plans
+                    .iter()
+                    .find(|p| p.id == id)
+                    .ok_or("ライフプランがありません")?;
+                let csv = lifeplan::csv(book, &lifeplan::cash_flow(book, p)?);
+                Ok((format!("{}-キャッシュフロー表.csv", p.name), csv))
+            });
+            match plan {
+                Some(Ok((name, csv))) => {
+                    if let Some(path) = choose_file(
+                        h,
+                        true,
+                        "キャッシュフロー表を保存",
+                        "CSV (*.csv)|*.csv",
+                        &name,
+                    ) {
+                        let outcome =
+                            std::fs::write(&path, csv)
+                                .map_err(|e| e.into())
+                                .and_then(|()| {
+                                    with(|s| {
+                                        s.note = format!("{} に保存しました", path.display());
+                                        s.update_status();
+                                    })
+                                    .ok_or_else(|| "busy".into())
+                                });
+                        report(h, Some(outcome));
+                    }
+                }
+                Some(Err(e)) => message(h, &e.to_string(), true),
+                None => {}
+            }
+        }
+        ID_TUTORIAL => form::show_text(
+            h,
+            "チュートリアル：家計簿・税金・ライフプラン",
+            &tutorial::text(),
+        ),
+        ID_COEFFICIENTS => {
+            if let Some(v) = form::show(
+                h,
+                "6つの係数",
+                vec![
+                    form::Field::Text("利率（年%）", "2".into()),
+                    form::Field::Text("年数", "10".into()),
+                ],
+            ) {
+                match planning::coefficients_text(&v[0], &v[1]) {
+                    Ok(text) => message(h, &text, false),
+                    Err(e) => message(h, &e.to_string(), true),
+                }
             }
         }
         ID_NEW_BOOK => new_book(h),
@@ -1577,6 +1992,10 @@ extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
                 let code = ((w.0 >> 16) & 0xffff) as u32;
                 if l.0 == 0 && DIALOGS.contains(&id) {
                     menu_command(h, id);
+                } else if let Some((_, act)) = RECORD_BUTTONS.iter().find(|b| b.0 == id) {
+                    if code == BN_CLICKED {
+                        record_action(h, *act);
+                    }
                 } else {
                     report(h, with(|s| s.command(id, code)));
                 }
@@ -1584,6 +2003,14 @@ extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
             }
             WM_NOTIFY => {
                 let header = &*(l.0 as *const NMHDR);
+                // Double-click on a record opens it for editing.
+                if header.idFrom == ID_G_LIST as usize
+                    && header.code == NM_DBLCLK
+                    && with(|s| !s.read_only && s.section().spec().edit.is_some()) == Some(true)
+                {
+                    record_action(h, Act::Edit);
+                    return LRESULT(0);
+                }
                 with(|s| s.notify(header));
             }
             WM_SIZE => {
@@ -1657,6 +2084,7 @@ fn menu() -> Result<HMENU> {
                 (0, ""),
                 (ID_BACKUP, "バックアップ(&B)..."),
                 (ID_CSV, "仕訳CSVを保存(&C)..."),
+                (ID_PLAN_CSV, "キャッシュフロー表をCSVで保存(&L)..."),
                 (0, ""),
                 (ID_EXIT, "終了(&X)"),
             ],
@@ -1673,19 +2101,37 @@ fn menu() -> Result<HMENU> {
         )?;
         let view = CreatePopupMenu()?;
         for (i, page) in PAGES.iter().enumerate() {
+            let key = if i < 9 {
+                format!("(&{})\tCtrl+{}", i + 1, i + 1)
+            } else {
+                String::new()
+            };
+            if i == RECORDS {
+                AppendMenuW(view, MF_SEPARATOR, 0, None)?;
+            }
             AppendMenuW(
                 view,
                 MF_STRING,
                 (ID_PAGE + i as u16) as usize,
-                &HSTRING::from(format!("{page}(&{})\tCtrl+{}", i + 1, i + 1)),
+                &HSTRING::from(format!("{page}{key}")),
             )?;
         }
         let help = CreatePopupMenu()?;
-        add(help, &[(ID_ABOUT, "YYaccountantについて(&A)")])?;
+        let tools = CreatePopupMenu()?;
+        add(tools, &[(ID_COEFFICIENTS, "6つの係数(&K)...")])?;
+        add(
+            help,
+            &[
+                (ID_TUTORIAL, "チュートリアル(&T)"),
+                (0, ""),
+                (ID_ABOUT, "YYaccountantについて(&A)"),
+            ],
+        )?;
         for (popup, title) in [
             (file, "ファイル(&F)"),
             (book, "帳簿(&B)"),
             (view, "表示(&V)"),
+            (tools, "ツール(&T)"),
             (help, "ヘルプ(&H)"),
         ] {
             AppendMenuW(bar, MF_POPUP, popup.0 as usize, &HSTRING::from(title))?;
@@ -1707,7 +2153,7 @@ fn accelerators() -> Result<HACCEL> {
         key(FCONTROL, VK_NEXT.0, ID_NEXT_PAGE),
         key(FCONTROL, VK_PRIOR.0, ID_PREV_PAGE),
     ];
-    for i in 0..PAGES.len() as u16 {
+    for i in 0..PAGES.len().min(9) as u16 {
         table.push(key(FCONTROL, u16::from(b'1') + i, ID_PAGE + i));
     }
     Ok(unsafe { CreateAcceleratorTableW(&table)? })
@@ -1827,6 +2273,30 @@ fn controls(h: HWND, instance: HINSTANCE) -> Result<BTreeMap<u16, Control>> {
             table | LVS_NOSORTHEADER,
         ),
         (Some(3), ID_R_SUMMARY, Kind::Label, "", 0),
+        (Some(RECORDS), ID_G_VIEW, Kind::Combo, "表示", combo),
+        (Some(RECORDS), ID_G_FROM, Kind::Date, "基準日", date),
+        (Some(RECORDS), ID_G_TO, Kind::Date, "〜", date),
+        (
+            Some(RECORDS),
+            ID_G_FLAG,
+            Kind::Button,
+            "完了も表示",
+            BS_AUTOCHECKBOX as u32,
+        ),
+        (Some(RECORDS), ID_G_LIST, Kind::Table, "一覧", table),
+        (
+            Some(RECORDS),
+            ID_G_DETAIL,
+            Kind::Table,
+            "詳細",
+            table | LVS_NOSORTHEADER,
+        ),
+        (Some(RECORDS), ID_G_SUMMARY, Kind::Label, "", 0),
+        (Some(RECORDS), ID_G_NEW, Kind::Button, "追加...", button),
+        (Some(RECORDS), ID_G_EDIT, Kind::Button, "編集...", button),
+        (Some(RECORDS), ID_G_REMOVE, Kind::Button, "削除", button),
+        (Some(RECORDS), ID_G_FIRST, Kind::Button, "", button),
+        (Some(RECORDS), ID_G_SECOND, Kind::Button, "", button),
     ];
     let create = |class: PCWSTR, title: &str, style: u32, ex: WINDOW_EX_STYLE, id: u16| unsafe {
         CreateWindowExW(
@@ -2059,6 +2529,7 @@ pub fn run() -> Result<()> {
             editing: None,
             version,
             note: String::new(),
+            views: BTreeMap::new(),
         };
         state.set_font();
         fill_combo(

@@ -1,4 +1,4 @@
-//! Small modal form (text fields and choices) used for book creation and settings.
+//! Small modal form (text fields and choices) used for books and every record page.
 //! The owner is disabled while it is open; Tab, Enter and Esc work as in a dialog.
 use super::*;
 
@@ -6,16 +6,24 @@ pub(super) enum Field {
     Text(&'static str, String),
     /// Label, options and the selected index. The value returned is the index.
     Choice(&'static str, Vec<String>, usize),
+    /// Label, (ID, text) items and the selected ID. The value returned is the ID.
+    Pick(&'static str, Vec<(i64, String)>, i64),
 }
 impl Field {
     fn label(&self) -> &'static str {
         match self {
-            Self::Text(l, _) | Self::Choice(l, _, _) => l,
+            Self::Text(l, _) | Self::Choice(l, _, _) | Self::Pick(l, _, _) => l,
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Input {
+    Text,
+    Choice,
+    Pick,
+}
 struct Form {
-    inputs: Vec<(HWND, bool)>,
+    inputs: Vec<(HWND, Input)>,
     labels: Vec<&'static str>,
     done: bool,
     accepted: Option<Vec<String>>,
@@ -47,12 +55,10 @@ pub(super) fn register(instance: HINSTANCE, icon: HICON) -> Result<()> {
 fn collect(f: &Form) -> Vec<String> {
     f.inputs
         .iter()
-        .map(|(h, choice)| {
-            if *choice {
-                combo_index(*h).unwrap_or(0).to_string()
-            } else {
-                text(*h)
-            }
+        .map(|(h, input)| match input {
+            Input::Text => text(*h),
+            Input::Choice => combo_index(*h).unwrap_or(0).to_string(),
+            Input::Pick => combo_value(*h).unwrap_or(0).to_string(),
         })
         .collect()
 }
@@ -89,24 +95,33 @@ extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
                         return;
                     };
                     SMOKE_VALUES.with(|values| {
-                        for ((input, choice), label) in f.inputs.iter().zip(&f.labels) {
+                        for ((input, kind), label) in f.inputs.iter().zip(&f.labels) {
                             let Some(value) = values.borrow().get(*label).cloned() else {
                                 continue;
                             };
-                            if *choice {
-                                let wanted = wide(&value);
-                                let index = send(
-                                    *input,
-                                    CB_FINDSTRINGEXACT,
-                                    usize::MAX,
-                                    wanted.as_ptr() as isize,
-                                );
-                                send(*input, CB_SETCURSEL, index.0.max(0) as usize, 0);
-                            } else {
+                            if *kind == Input::Text {
                                 set_text(*input, &value);
+                                continue;
+                            }
+                            // The first option containing the value, as a user would pick it.
+                            let count = send(*input, CB_GETCOUNT, 0, 0).0.max(0) as usize;
+                            for i in 0..count {
+                                let length = send(*input, CB_GETLBTEXTLEN, i, 0).0.max(0) as usize;
+                                let mut buffer = vec![0u16; length + 1];
+                                send(*input, CB_GETLBTEXT, i, buffer.as_mut_ptr() as isize);
+                                if String::from_utf16_lossy(&buffer[..length]).contains(&value) {
+                                    send(*input, CB_SETCURSEL, i, 0);
+                                    break;
+                                }
                             }
                         }
-                        values.borrow_mut().clear();
+                        // The first step of a two-step form (one choice) leaves the
+                        // values of the form that follows it.
+                        if let [label] = f.labels.as_slice() {
+                            values.borrow_mut().remove(*label);
+                        } else {
+                            values.borrow_mut().clear();
+                        }
                     });
                 });
                 let _ = PostMessageW(Some(h), WM_COMMAND, WPARAM(IDOK.0 as usize), LPARAM(0));
@@ -118,13 +133,156 @@ extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     }
 }
 
+/// Shows long read-only text (the tutorial) in a scrollable box with an OK button.
+pub(super) fn show_text(owner: HWND, title: &str, body: &str) {
+    unsafe {
+        let dpi = GetDpiForWindow(owner).max(96) as i32;
+        let px = |v: i32| scale(dpi, v);
+        let Ok(module) = GetModuleHandleW(None) else {
+            return;
+        };
+        let instance: HINSTANCE = module.into();
+        let mut owner_rect = RECT::default();
+        let _ = GetWindowRect(owner, &mut owner_rect);
+        // As large as the owner allows, up to a comfortable reading width.
+        let (ow, oh) = (
+            owner_rect.right - owner_rect.left,
+            owner_rect.bottom - owner_rect.top,
+        );
+        let (width, height) = (
+            px(760).min(ow - px(40)).max(px(320)),
+            px(620).min(oh - px(80)).max(px(260)),
+        );
+        let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let ex = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
+        let mut frame = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let _ = AdjustWindowRectExForDpi(&mut frame, style, false, ex, dpi as u32);
+        let (fw, fh) = (frame.right - frame.left, frame.bottom - frame.top);
+        let Ok(h) = CreateWindowExW(
+            ex,
+            w!("YYAccountantForm"),
+            &HSTRING::from(title),
+            style,
+            owner_rect.left + ((ow - fw) / 2).max(0),
+            owner_rect.top + ((oh - fh) / 3).max(0),
+            fw,
+            fh,
+            Some(owner),
+            None,
+            Some(instance),
+            None,
+        ) else {
+            return;
+        };
+        let font = window_font(dpi);
+        let m = px(12);
+        let child =
+            |class: PCWSTR, text: &str, style: u32, ex: WINDOW_EX_STYLE, id: i32, r: RECT| {
+                let c = CreateWindowExW(
+                    ex,
+                    class,
+                    &HSTRING::from(text),
+                    WS_CHILD | WS_VISIBLE | WINDOW_STYLE(style),
+                    r.left,
+                    r.top,
+                    r.right,
+                    r.bottom,
+                    Some(h),
+                    Some(HMENU(id as usize as *mut _)),
+                    Some(instance),
+                    None,
+                )
+                .unwrap_or_default();
+                send(c, WM_SETFONT, font.0 as usize, 0);
+                c
+            };
+        let box_style = ES_MULTILINE as u32
+            | ES_READONLY as u32
+            | ES_AUTOVSCROLL as u32
+            | WS_VSCROLL.0
+            | WS_TABSTOP.0;
+        let text_box = child(
+            w!("EDIT"),
+            &body.replace("\r\n", "\n").replace('\n', "\r\n"),
+            box_style,
+            WS_EX_CLIENTEDGE,
+            FIELD as i32,
+            RECT {
+                left: m,
+                top: m,
+                right: width - m * 2,
+                bottom: height - m * 3 - px(32),
+            },
+        );
+        child(
+            w!("BUTTON"),
+            "閉じる",
+            (BS_DEFPUSHBUTTON as u32) | WS_TABSTOP.0,
+            WINDOW_EX_STYLE(0),
+            IDOK.0,
+            RECT {
+                left: width - m - px(108),
+                top: height - m - px(32),
+                right: px(108),
+                bottom: px(32),
+            },
+        );
+        FORM.with(|f| {
+            *f.borrow_mut() = Some(Form {
+                inputs: vec![],
+                labels: vec![],
+                done: false,
+                accepted: None,
+            })
+        });
+        let _ = EnableWindow(owner, false);
+        let smoke = SMOKE.with(|s| s.get());
+        let _ = ShowWindow(h, if smoke { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        let _ = SetFocus(Some(text_box));
+        if smoke {
+            SMOKE_MESSAGES.with(|m| {
+                m.borrow_mut()
+                    .push(format!("{title}: {}", text(text_box).chars().count()))
+            });
+            let _ = PostMessageW(Some(h), AUTO_FILL, WPARAM(0), LPARAM(0));
+        }
+        let mut msg = MSG::default();
+        while !FORM.with(|f| f.borrow().as_ref().is_none_or(|f| f.done)) {
+            let result = GetMessageW(&mut msg, None, 0, 0).0;
+            if result <= 0 {
+                if result == 0 {
+                    PostQuitMessage(msg.wParam.0 as i32);
+                }
+                break;
+            }
+            if IsDialogMessageW(h, &msg).as_bool() {
+                continue;
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let _ = EnableWindow(owner, true);
+        let _ = DestroyWindow(h);
+        let _ = DeleteObject(font.into());
+        FORM.with(|f| f.borrow_mut().take());
+        if !smoke {
+            let _ = SetForegroundWindow(owner);
+        }
+    }
+}
+
 /// Shows the form and returns the values (text, or the index of a choice) on OK.
 pub(super) fn show(owner: HWND, title: &str, fields: Vec<Field>) -> Option<Vec<String>> {
     unsafe {
         let dpi = GetDpiForWindow(owner).max(96) as i32;
         let px = |v: i32| scale(dpi, v);
         let instance: HINSTANCE = GetModuleHandleW(None).ok()?.into();
-        let (label_w, field_w, row, m) = (px(150), px(260), px(36), px(16));
+        let (label_w, field_w, row, m) = (px(240), px(300), px(36), px(16));
         let width = m * 2 + label_w + field_w;
         let height = m * 2 + row * fields.len() as i32 + px(44);
         let mut frame = RECT {
@@ -203,6 +361,18 @@ pub(super) fn show(owner: HWND, title: &str, fields: Vec<Field>) -> Option<Vec<S
                     id,
                     rect(m + label_w, y, field_w, px(26)),
                 ),
+                Field::Pick(_, items, selected) => {
+                    let c = child(
+                        w!("COMBOBOX"),
+                        "",
+                        CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | WS_TABSTOP.0,
+                        WINDOW_EX_STYLE(0),
+                        id,
+                        rect(m + label_w, y, field_w, px(300)),
+                    );
+                    fill_combo(c, items, Some(*selected));
+                    c
+                }
                 Field::Choice(_, options, selected) => {
                     let c = child(
                         w!("COMBOBOX"),
@@ -221,7 +391,14 @@ pub(super) fn show(owner: HWND, title: &str, fields: Vec<Field>) -> Option<Vec<S
                     c
                 }
             };
-            inputs.push((input, matches!(field, Field::Choice(..))));
+            inputs.push((
+                input,
+                match field {
+                    Field::Text(..) => Input::Text,
+                    Field::Choice(..) => Input::Choice,
+                    Field::Pick(..) => Input::Pick,
+                },
+            ));
             labels.push(field.label());
         }
         let y = height - m - px(32);

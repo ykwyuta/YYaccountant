@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Read, Write};
 use yy_accountant::{
-    Book, BookKind, Category, Change, NewBook, Role, Store, budget, chart, claims, cost, forecast,
-    model, num, plans, reports,
+    Book, BookKind, Category, Change, LifePlan, NewBook, Role, Store, TaxReturn, budget, chart,
+    claims, cost, forecast, lifeplan, model, num, plans, reports, tax, tutorial,
 };
 const MAX_MESSAGE: usize = 2 * 1024 * 1024;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -47,6 +47,50 @@ fn tools() -> Value {
         json!({"id":id0,"code":text,"name":text,"category":category,"role":role,"parent":opt_id,"payment":flag,"guide":text,"keywords":{"type":"array","items":text},"archived":flag}),
         &["code", "name", "category"],
     );
+    let tax_amounts = [
+        "salary",
+        "salary_withheld",
+        "social_insurance",
+        "side_revenue",
+        "side_expenses",
+        "side_withheld",
+        "blue_deduction",
+        "spouse_income",
+        "mutual_aid",
+        "life_general_new",
+        "life_general_old",
+        "life_care",
+        "life_pension_new",
+        "life_pension_old",
+        "earthquake",
+        "medical_paid",
+        "medical_covered",
+        "self_medication",
+        "donation",
+        "housing_balance",
+        "housing_limit",
+        "housing_rate",
+        "housing_resident_cap",
+        "per_capita",
+    ];
+    let disability = json!({"enum":["none","normal","special"]});
+    let mut tax_props = json!({"id":id0,"year":{"type":"integer","enum":tax::YEARS},"name":text,"memo":text,
+        "side_kind":{"enum":tax::SideKind::ALL.iter().map(|k| json!(k)).collect::<Vec<_>>()},
+        "self_disability":disability,"has_spouse":flag,"spouse_birth_year":{"type":["integer","null"]},"spouse_disability":disability,
+        "dependents":{"type":"array","maxItems":30,"items":obj(json!({"name":text,"relation":{"enum":["child","parent","other"]},"birth_year":{"type":"integer"},"income":dec,"cohabiting":flag,"disability":disability}),&["name","birth_year"])}});
+    for k in tax_amounts {
+        tax_props[k] = dec.clone();
+    }
+    let tax_return = obj(tax_props, &["year"]);
+    let kind = json!({"enum":["income","expense"]});
+    let year = json!({"type":"integer","minimum":1900,"maximum":2999});
+    let life_plan = obj(
+        json!({"id":id0,"name":text,"memo":text,"start_year":year,"years":{"type":"integer","minimum":1,"maximum":100},"savings":dec,"return_percent":dec,
+            "members":{"type":"array","items":obj(json!({"name":text,"relation":text,"birth_year":year}),&["name","birth_year"])},
+            "flows":{"type":"array","items":obj(json!({"name":text,"kind":kind,"amount":dec,"start_year":year,"end_year":year,"growth_percent":dec}),&["name","kind","amount","start_year","end_year"])},
+            "events":{"type":"array","items":obj(json!({"year":year,"name":text,"kind":kind,"amount":dec,"growth_percent":dec}),&["year","name","kind","amount"])}}),
+        &["name", "start_year", "years"],
+    );
     let change = json!({"oneOf":[
         op("update_book", json!({"name":text,"currency":text,"minor_digits":{"type":"integer","minimum":0,"maximum":4},"rounding":{"enum":["half_up","down","up","half_even"]},"fiscal_start_month":{"type":"integer","minimum":1,"maximum":12}}), &["name","currency","minor_digits","rounding","fiscal_start_month"]),
         op("save_account", json!({"account":account}), &["account"]),
@@ -65,7 +109,9 @@ fn tools() -> Value {
         op("post_depreciation", json!({"equipment":id,"fiscal_year":{"type":"integer"},"date":date}), &["equipment","fiscal_year","date"]),
         op("save_product", json!({"product":obj(json!({"id":id0,"name":text,"unit":text,"labor_hours":dec,"labor_rate":dec,"overhead_percent":dec,"archived":flag,"memo":text,"materials":uses("material"),"equipment":uses("equipment")}),&["name","unit"])}), &["product"]),
         op("save_production", json!({"production":obj(json!({"id":id0,"product":id,"date":date,"quantity":dec,"labor_hours":dec,"memo":text,"materials":uses("material"),"equipment":uses("equipment")}),&["product","date","quantity"])}), &["production"]),
-        op("remove", json!({"target":{"enum":["account","partner","claim","budget","plan","material","material_move","equipment","product","production"]},"id":id}), &["target","id"]),
+        op("save_tax_return", json!({"tax_return":tax_return.clone()}), &["tax_return"]),
+        op("save_life_plan", json!({"life_plan":life_plan.clone()}), &["life_plan"]),
+        op("remove", json!({"target":{"enum":["account","partner","claim","budget","plan","material","material_move","equipment","product","production","tax_return","life_plan"]},"id":id}), &["target","id"]),
     ]});
     let book = json!({"book_id":id});
     let mut list = vec![];
@@ -75,7 +121,7 @@ fn tools() -> Value {
                    required: &[&str],
                    read_only: bool| {
         let mut p = properties;
-        if name != "book_list" && name != "book_create" {
+        if !["book_list", "book_create", "tutorial", "metadata"].contains(&name) {
             p["book_id"] = id.clone();
         }
         list.push(json!({"name":name,"description":description,"inputSchema":obj(p,required),"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"idempotentHint":read_only,"openWorldHint":false}}));
@@ -186,6 +232,42 @@ fn tools() -> Value {
         true,
     );
     add(
+        "tax_calculate",
+        "Estimate Japanese income tax (with reconstruction tax) and resident tax for one year: salary and side income, spouse and dependents (children, parents living together), social insurance, iDeCo, life/earthquake insurance, medical expenses, furusato nozei (with the donation limit estimate) and the mortgage credit. Pass a saved tax_return_id or an unsaved tax_return. Supported years are in metadata tax_years; amounts follow that year's rules and should be checked against official guidance before filing.",
+        json!({"tax_return_id":id,"tax_return":tax_return}),
+        &["book_id"],
+        true,
+    );
+    add(
+        "life_plan_cash_flow",
+        "Yearly cash-flow table of a life plan (ages, incomes, expenses, events, investment return, year-end savings, shortfall years). Pass a saved life_plan_id or an unsaved life_plan. With compare_id, also compares year-end savings with another saved plan (base = this plan, proposal = compare_id). With csv, adds the table as UTF-8 CSV text.",
+        json!({"life_plan_id":id,"compare_id":id,"life_plan":life_plan,"csv":flag}),
+        &["book_id"],
+        true,
+    );
+    add(
+        "life_plan_draft",
+        "Current state from the book (last 12 months of income and expenses up to as_of, cash and net assets) and an unsaved draft life plan built from it. With tax_return_id, the draft uses that year's estimated take-home pay as income.",
+        json!({"as_of":date,"tax_return_id":id}),
+        &["book_id", "as_of"],
+        true,
+    );
+    add(
+        "fp_calculator",
+        "Financial planning helpers. kind coefficients: the six coefficients for rate (annual %) and years. kind loan: monthly/annual payment of an equal-payment loan (principal, rate, years). kind education: education cost flows and entrance fee events for a child (child, birth_year, schools for kindergarten/elementary/junior/high/university each none, public or private, growth_percent).",
+        json!({"kind":{"enum":["coefficients","loan","education"]},"rate":dec,"years":{"type":"integer","minimum":1,"maximum":100},"principal":dec,
+            "child":text,"birth_year":year,"schools":{"type":"array","minItems":5,"maxItems":5,"items":{"enum":["none","public","private"]}},"growth_percent":dec}),
+        &["book_id", "kind"],
+        true,
+    );
+    add(
+        "tutorial",
+        "Beginner tutorial for bookkeeping, taxes and life plans, as chapters and steps.",
+        json!({}),
+        &[],
+        true,
+    );
+    add(
         "metadata",
         "Labels for enumerations (categories, roles, kinds, rounding, frequencies, repayment methods).",
         json!({}),
@@ -208,6 +290,12 @@ pub(crate) fn metadata() -> Value {
         "rounding": pairs(num::Rounding::ALL.iter().map(|k| (json!(k), k.label())).collect()),
         "frequencies": pairs(model::Frequency::ALL.iter().map(|k| (json!(k), k.label())).collect()),
         "repayments": pairs(model::Repayment::ALL.iter().map(|k| (json!(k), k.label())).collect()),
+        "side_kinds": pairs(tax::SideKind::ALL.iter().map(|k| (json!(k), k.label())).collect()),
+        "disabilities": pairs(tax::Disability::ALL.iter().map(|k| (json!(k), k.label())).collect()),
+        "relations": pairs(tax::Relation::ALL.iter().map(|k| (json!(k), k.label())).collect()),
+        "flow_kinds": pairs(lifeplan::FlowKind::ALL.iter().map(|k| (json!(k), k.label())).collect()),
+        "tax_years": tax::YEARS,
+        "education": lifeplan::EDUCATION,
         "methods": pairs([forecast::Method::Auto, forecast::Method::MovingAverage, forecast::Method::Linear, forecast::Method::Seasonal].iter().map(|k| (json!(k), k.label())).collect()),
     })
 }
@@ -315,6 +403,63 @@ struct Csv {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TaxArgs {
+    book_id: i64,
+    #[serde(default)]
+    tax_return_id: Option<i64>,
+    #[serde(default)]
+    tax_return: Option<TaxReturn>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanArgs {
+    book_id: i64,
+    #[serde(default)]
+    life_plan_id: Option<i64>,
+    #[serde(default)]
+    compare_id: Option<i64>,
+    #[serde(default)]
+    life_plan: Option<LifePlan>,
+    #[serde(default)]
+    csv: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftArgs {
+    book_id: i64,
+    as_of: chrono::NaiveDate,
+    #[serde(default)]
+    tax_return_id: Option<i64>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FpKind {
+    Coefficients,
+    Loan,
+    Education,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FpArgs {
+    book_id: i64,
+    kind: FpKind,
+    #[serde(default)]
+    rate: Option<num::D>,
+    #[serde(default)]
+    years: Option<u32>,
+    #[serde(default)]
+    principal: Option<num::D>,
+    #[serde(default)]
+    child: Option<String>,
+    #[serde(default)]
+    birth_year: Option<i32>,
+    #[serde(default)]
+    schools: Option<[lifeplan::School; 5]>,
+    #[serde(default)]
+    growth_percent: Option<num::D>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Audit {
     book_id: i64,
     #[serde(default)]
@@ -411,6 +556,98 @@ pub(crate) fn call(store: &mut Store, name: &str, a: Value) -> Result<Value> {
         "csv_export" => {
             let c: Csv = args(a)?;
             json!({"mime_type":"text/csv; charset=utf-8","content":reports::journal_csv(&store.get(c.book_id)?, c.from, c.to)})
+        }
+        "tax_calculate" => {
+            let t: TaxArgs = args(a)?;
+            let book = store.get(t.book_id)?;
+            let input = match (t.tax_return_id, t.tax_return) {
+                (Some(id), None) => book
+                    .tax_returns
+                    .iter()
+                    .find(|x| x.id == id)
+                    .cloned()
+                    .ok_or("税額計算がありません")?,
+                (None, Some(input)) => input,
+                _ => return Err("Pass either tax_return_id or tax_return".into()),
+            };
+            serde_json::to_value(tax::calculate(&book, &input)?)?
+        }
+        "life_plan_cash_flow" => {
+            let p: PlanArgs = args(a)?;
+            let book = store.get(p.book_id)?;
+            let find = |id: i64| -> Result<LifePlan> {
+                Ok(book
+                    .life_plans
+                    .iter()
+                    .find(|x| x.id == id)
+                    .cloned()
+                    .ok_or("ライフプランがありません")?)
+            };
+            let plan = match (p.life_plan_id, p.life_plan) {
+                (Some(id), None) => find(id)?,
+                (None, Some(plan)) => plan,
+                _ => return Err("Pass either life_plan_id or life_plan".into()),
+            };
+            let flow = lifeplan::cash_flow(&book, &plan)?;
+            let mut v = serde_json::to_value(&flow)?;
+            if p.csv {
+                v["csv"] = json!(lifeplan::csv(&book, &flow));
+            }
+            if let Some(other) = p.compare_id {
+                v["comparison"] =
+                    serde_json::to_value(lifeplan::compare(&book, &plan, &find(other)?)?)?;
+            }
+            v
+        }
+        "life_plan_draft" => {
+            let d: DraftArgs = args(a)?;
+            let book = store.get(d.book_id)?;
+            let take_home = match d.tax_return_id {
+                Some(id) => {
+                    let t = book
+                        .tax_returns
+                        .iter()
+                        .find(|x| x.id == id)
+                        .ok_or("税額計算がありません")?;
+                    Some(tax::calculate(&book, t)?.take_home.0)
+                }
+                None => None,
+            };
+            json!({"baseline": lifeplan::baseline(&book, d.as_of)?, "draft": lifeplan::draft(&book, d.as_of, take_home)?})
+        }
+        "fp_calculator" => {
+            let f: FpArgs = args(a)?;
+            let book = store.get(f.book_id)?;
+            let need = |v: Option<num::D>, what: &str| -> Result<num::Decimal> {
+                Ok(v.ok_or(format!("{what} is required"))?.0)
+            };
+            let years = || f.years.ok_or("years is required");
+            match f.kind {
+                FpKind::Coefficients => {
+                    serde_json::to_value(lifeplan::coefficients(need(f.rate, "rate")?, years()?)?)?
+                }
+                FpKind::Loan => serde_json::to_value(lifeplan::loan_payment(
+                    &book,
+                    need(f.principal, "principal")?,
+                    need(f.rate, "rate")?,
+                    years()?,
+                )?)?,
+                FpKind::Education => {
+                    let (flows, events) = lifeplan::education(&lifeplan::EducationRequest {
+                        child: f.child.clone().ok_or("child is required")?,
+                        birth_year: f.birth_year.ok_or("birth_year is required")?,
+                        schools: f.schools.ok_or("schools is required")?,
+                        growth_percent: f.growth_percent.map(|d| d.0).unwrap_or_default(),
+                    })?;
+                    json!({"flows": flows, "events": events})
+                }
+            }
+        }
+        "tutorial" => {
+            if !a.as_object().is_some_and(|o| o.is_empty()) {
+                return Err("Unknown tool argument".into());
+            }
+            json!({"chapters": tutorial::CHAPTERS})
         }
         "audit_list" => {
             let x: Audit = args(a)?;
@@ -598,7 +835,7 @@ mod tests {
         );
         assert_eq!(out[0]["error"]["code"], -32000);
         let tools = out[2]["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 21);
         for t in tools {
             assert_eq!(t["inputSchema"]["additionalProperties"], false);
         }

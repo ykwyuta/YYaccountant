@@ -7,15 +7,20 @@ pub mod chart;
 pub mod claims;
 pub mod cost;
 pub mod forecast;
+pub mod lifeplan;
 pub mod model;
 pub mod num;
 pub mod plans;
 pub mod reports;
 mod store;
+pub mod tax;
+pub mod tutorial;
 
 pub use change::{Change, QuickEntry, QuickKind, Settlement, Target};
+pub use lifeplan::LifePlan;
 pub use model::*;
 pub use store::{Applied, BookInfo, NewBook, Store};
+pub use tax::TaxReturn;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

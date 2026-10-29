@@ -53,6 +53,15 @@ def main():
         assert db.execute("SELECT description FROM entries WHERE book_id = 1 AND id = 1").fetchone() == (
             "開始残高（修正）",)
         assert db.execute("SELECT count(*) FROM entries WHERE void").fetchone() == (0,)
+        # Tax inputs and life plans are stored as decimal TEXT in their own tables.
+        for table, column in [("tax_returns", "salary"), ("tax_dependents", "income"),
+                              ("life_plans", "savings"), ("life_plan_flows", "amount")]:
+            kinds = {kind for (kind,) in db.execute(f"SELECT DISTINCT typeof({column}) FROM {table}")}
+            assert kinds == {"text"}, (table, kinds)
+        assert db.execute("SELECT salary, count(*) FROM tax_returns").fetchone() == ("6000000", 1)
+        assert db.execute("SELECT count(*) FROM life_plans").fetchone() == (2,)
+        for operation in ["save_tax_return", "save_life_plan"]:
+            assert operation in changes, operation
 
     try:
         from PIL import Image

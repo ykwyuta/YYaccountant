@@ -69,6 +69,8 @@ pub enum Target {
     Equipment,
     Product,
     Production,
+    TaxReturn,
+    LifePlan,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -142,6 +144,12 @@ pub enum Change {
     },
     SaveProduction {
         production: Production,
+    },
+    SaveTaxReturn {
+        tax_return: Box<crate::tax::TaxReturn>,
+    },
+    SaveLifePlan {
+        life_plan: crate::lifeplan::LifePlan,
     },
     Remove {
         target: Target,
@@ -614,6 +622,19 @@ impl Book {
                 "production",
                 "製造実績"
             )),
+            Change::SaveTaxReturn { tax_return } => {
+                let mut t = (**tax_return).clone();
+                t.name = t.name.trim().into();
+                if t.name.is_empty() {
+                    t.name = format!("{}年分", t.year);
+                }
+                Some(save!(self, tax_returns, t, "tax_return", "税額計算"))
+            }
+            Change::SaveLifePlan { life_plan } => {
+                let mut p = life_plan.clone();
+                p.name = p.name.trim().into();
+                Some(save!(self, life_plans, p, "life_plan", "ライフプラン"))
+            }
             Change::Remove { target, id } => {
                 self.remove(*target, *id)?;
                 None
@@ -716,6 +737,8 @@ impl Book {
                 take(&mut self.products, id, |x| x.id)
             }
             Target::Production => take(&mut self.productions, id, |x| x.id),
+            Target::TaxReturn => take(&mut self.tax_returns, id, |x| x.id),
+            Target::LifePlan => take(&mut self.life_plans, id, |x| x.id),
         }
     }
 }

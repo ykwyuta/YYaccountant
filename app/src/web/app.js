@@ -5,6 +5,7 @@
 const $ = (s) => document.querySelector(s);
 const VIEWS = [
   ["home", "ホーム"],
+  ["guide", "はじめに"],
   ["input", "かんたん入力"],
   ["journal", "仕訳帳"],
   ["accounts", "勘定科目・取引先"],
@@ -13,6 +14,8 @@ const VIEWS = [
   ["plans", "計画"],
   ["cost", "原価管理"],
   ["stats", "統計・予測"],
+  ["tax", "税金"],
+  ["lifeplan", "ライフプラン"],
   ["reports", "帳票"],
   ["audit", "変更履歴"],
 ];
@@ -3688,6 +3691,1125 @@ RENDER.audit = async () => {
     ),
   );
 };
+
+// ----- Tutorial -----
+const SCREEN_VIEWS = {
+  記帳: "input",
+  仕訳帳: "journal",
+  帳票: "reports",
+  予算: "budget",
+  税金: "tax",
+  ライフプラン: "lifeplan",
+};
+RENDER.guide = async () => {
+  S.tutorial = S.tutorial || (await api("tutorial")).chapters;
+  return h(
+    "div",
+    { class: "guide" },
+    h(
+      "p",
+      { class: "muted" },
+      "会計や税金の知識がなくても使い始められるように、操作と考え方を順に説明します。税制の金額基準は毎年のように変わるので、税額は試算として使い、申告前に国税庁・市区町村の案内で確かめてください。",
+    ),
+    S.tutorial.map((c) =>
+      h(
+        "div",
+        { class: "card" },
+        h("h2", {}, c.title),
+        h("p", {}, c.lead),
+        c.steps.map((st) =>
+          h(
+            "section",
+            { class: "step" },
+            h("h3", {}, st.title),
+            st.body.map((p) => h("p", {}, p)),
+            st.try_it.length
+              ? h(
+                  "div",
+                  { class: "try" },
+                  h("strong", {}, "やってみる"),
+                  h(
+                    "ol",
+                    {},
+                    st.try_it.map((t) => h("li", {}, t)),
+                  ),
+                  SCREEN_VIEWS[st.screen]
+                    ? h(
+                        "button",
+                        { onclick: () => go(SCREEN_VIEWS[st.screen]) },
+                        `「${st.screen}」を開く`,
+                      )
+                    : null,
+                )
+              : null,
+          ),
+        ),
+      ),
+    ),
+  );
+};
+
+// ----- Tax -----
+const orZero = (v) => v ?? "0";
+const yearsOld = (year, born) => (born ? `${year - born}歳` : "");
+function saveTax(t, patch, done) {
+  return change({ operation: "save_tax_return", tax_return: { ...t, ...patch } }, done);
+}
+RENDER.tax = async () => {
+  const list = S.book.tax_returns;
+  if (!list.find((t) => t.id === S.taxId)) S.taxId = list[list.length - 1]?.id;
+  const t = list.find((x) => x.id === S.taxId);
+  const ro = S.readonly;
+  const bar = h(
+    "div",
+    { class: "toolbar" },
+    list.length
+      ? h(
+          "select",
+          {
+            "aria-label": "年分",
+            onchange: (e) => ((S.taxId = Number(e.target.value)), render()),
+          },
+          list.map((x) => h("option", { value: x.id, selected: x.id === S.taxId }, x.name)),
+        )
+      : null,
+    t ? h("button", { disabled: ro, onclick: () => editIncome(t) }, "収入...") : null,
+    t ? h("button", { disabled: ro, onclick: () => editFamily(t) }, "家族...") : null,
+    t ? h("button", { disabled: ro, onclick: () => editDependent(t, null) }, "親族を追加...") : null,
+    t ? h("button", { disabled: ro, onclick: () => editDeductions(t) }, "控除...") : null,
+    t ? h("button", { disabled: ro, onclick: () => editHousing(t) }, "住宅ローン...") : null,
+    h("span", { class: "spacer" }),
+    t ? h("button", { disabled: ro, onclick: () => remove("tax_return", t.id) }, "削除") : null,
+    h("button", { class: "primary", disabled: ro, onclick: () => newTax() }, "年分を追加"),
+  );
+  if (!t)
+    return h(
+      "div",
+      {},
+      bar,
+      h(
+        "div",
+        { class: "card" },
+        h(
+          "p",
+          {},
+          "年分を追加すると、給与・副業・家族・保険・医療費・ふるさと納税・住宅ローンから所得税と住民税を試算できます。",
+        ),
+        h(
+          "p",
+          { class: "muted" },
+          `対応している年分: ${S.meta.tax_years.join("・")}年分。手順は「はじめに」の「税金を計算する」を見てください。`,
+        ),
+      ),
+    );
+  const r = await api("tax_calculate", bookArgs({ tax_return_id: t.id }));
+  const refund = r.balance_due.startsWith("-");
+  const tiles = h(
+    "div",
+    { class: "tiles" },
+    tile(
+      refund ? "所得税の還付（見込み）" : "所得税の納付（見込み）",
+      refund ? r.balance_due.slice(1) : r.balance_due,
+      `年税額 ${fmt(r.income_tax)} − 源泉徴収 ${fmt(r.withheld)}`,
+    ),
+    tile("住民税（翌年6月から）", r.resident_tax, `課税所得 ${fmt(r.taxable_resident)}`),
+    tile("手取りの目安", r.take_home, "収入 − 経費 − 社会保険料 − 税金"),
+    tile(
+      "ふるさと納税の上限の目安",
+      r.donation_limit,
+      isZero(t.donation)
+        ? "自己負担2,000円で済む寄附額"
+        : `寄附 ${fmt(t.donation)} の実質負担 ${fmt(r.donation_cost)}`,
+    ),
+  );
+  const relation = (k) => label("relations", k);
+  const family = h(
+    "div",
+    { class: "card" },
+    h("h2", {}, "家族"),
+    h(
+      "p",
+      {},
+      t.has_spouse
+        ? `配偶者: 合計所得 ${fmt(t.spouse_income)} 円${t.spouse_birth_year ? `・${yearsOld(t.year, t.spouse_birth_year)}` : ""}${t.spouse_disability !== "none" ? `・${label("disabilities", t.spouse_disability)}` : ""}`
+        : "配偶者: なし",
+    ),
+    t.dependents.length
+      ? table(
+          ["名前", "続柄", "年齢（年末）", "合計所得", "同居", "障害", ""],
+          t.dependents.map((d, i) =>
+            h(
+              "tr",
+              {},
+              h("td", {}, d.name),
+              h("td", {}, relation(d.relation)),
+              h("td", {}, yearsOld(t.year, d.birth_year)),
+              num(d.income),
+              h("td", {}, d.cohabiting ? "同居" : ""),
+              h("td", {}, d.disability === "none" ? "" : label("disabilities", d.disability)),
+              h(
+                "td",
+                {},
+                h("button", { disabled: ro, onclick: () => editDependent(t, i) }, "編集"),
+                h(
+                  "button",
+                  {
+                    disabled: ro,
+                    onclick: () =>
+                      saveTax(
+                        t,
+                        { dependents: t.dependents.filter((_, j) => j !== i) },
+                        "親族を外しました",
+                      ).then(render),
+                  },
+                  "外す",
+                ),
+              ),
+            ),
+          ),
+          { numeric: [3] },
+        )
+      : h("p", { class: "muted" }, "子や同居の親など、生計を一にする親族を「親族を追加...」で入れます。"),
+  );
+  let section = "";
+  const rows = [];
+  for (const l of r.lines) {
+    if (l.section !== section) {
+      section = l.section;
+      rows.push(h("tr", { class: "group" }, h("td", { colspan: 4 }, section)));
+    }
+    const total = /合計|年税額|納める|還付|課税所得|所得税及び/.test(l.label);
+    rows.push(
+      h(
+        "tr",
+        { class: total ? "total" : null },
+        h("td", {}, l.label),
+        l.income_tax === null ? h("td") : num(l.income_tax),
+        l.resident_tax === null ? h("td") : num(l.resident_tax),
+        h("td", { class: "muted" }, l.note || ""),
+      ),
+    );
+  }
+  return h(
+    "div",
+    {},
+    bar,
+    tiles,
+    h(
+      "div",
+      { class: "card" },
+      h("h2", {}, r.filing_required ? "確定申告が必要です" : "確定申告の要否"),
+      h(
+        "ul",
+        { class: "notes" },
+        r.notes.map((n) => h("li", {}, n)),
+      ),
+    ),
+    family,
+    h(
+      "div",
+      { class: "card" },
+      h("h2", {}, `${t.year}年分の計算`),
+      table(["項目", "所得税", "住民税", "説明"], rows, { numeric: [1, 2] }),
+    ),
+  );
+};
+function taxForm(title, t, spec, patch) {
+  const f = fields(spec);
+  modal(`${title}（${t.name}）`, f.element, {
+    onSubmit: async () => {
+      await saveTax(t, patch(f.values()));
+      render();
+    },
+  });
+}
+const moneyField = (t, key, labelText, help) => ({
+  key,
+  label: labelText,
+  type: "decimal",
+  value: isZero(t[key]) ? "" : t[key],
+  help,
+});
+function newTax() {
+  const years = S.meta.tax_years;
+  const prev = S.book.tax_returns[S.book.tax_returns.length - 1];
+  const f = fields([
+    {
+      key: "year",
+      label: "年分",
+      type: "select",
+      options: years.map((y) => [y, `${y}年分`]),
+      value: years[years.length - 1],
+    },
+    { key: "name", label: "名前", placeholder: "空欄なら「2026年分」" },
+    ...(prev
+      ? [
+          {
+            key: "copy",
+            label: `「${prev.name}」の入力を引き継ぐ`,
+            type: "checkbox",
+            value: true,
+          },
+        ]
+      : []),
+  ]);
+  modal("年分を追加", f.element, {
+    onSubmit: async () => {
+      const v = f.values();
+      const base = v.copy ? { ...prev } : {};
+      const r = await change({
+        operation: "save_tax_return",
+        tax_return: { ...base, id: 0, year: Number(v.year), name: v.name },
+      });
+      S.taxId = r.id;
+      render();
+    },
+  });
+}
+function editIncome(t) {
+  taxForm(
+    "収入",
+    t,
+    [
+      moneyField(t, "salary", "給与の支払金額", "源泉徴収票の「支払金額」"),
+      moneyField(t, "salary_withheld", "源泉徴収税額", "源泉徴収票の「源泉徴収税額」"),
+      moneyField(
+        t,
+        "social_insurance",
+        "社会保険料",
+        "源泉徴収票の「社会保険料等の金額」＋自分で払った家族分の国民年金・国民健康保険など",
+      ),
+      moneyField(t, "mutual_aid", "iDeCoなどの掛金", "小規模企業共済等掛金（全額控除）"),
+      {
+        key: "side_kind",
+        label: "副業の種類",
+        type: "select",
+        options: S.meta.side_kinds,
+        value: t.side_kind,
+        help: "会社員の副業の多くは雑所得（業務）です",
+      },
+      moneyField(t, "side_revenue", "副業の収入", "売上・報酬の合計（2か所目の給与なら支払金額）"),
+      moneyField(t, "side_expenses", "副業の経費"),
+      moneyField(t, "side_withheld", "副業の源泉徴収税額", "報酬から天引きされた税額（支払調書など）"),
+      {
+        key: "blue_deduction",
+        label: "青色申告特別控除",
+        type: "select",
+        options: [
+          ["0", "なし"],
+          ["100000", "10万円"],
+          ["550000", "55万円"],
+          ["650000", "65万円（電子申告など）"],
+        ],
+        value: String(Number(t.blue_deduction)),
+      },
+      {
+        key: "self_disability",
+        label: "本人の障害",
+        type: "select",
+        options: S.meta.disabilities,
+        value: t.self_disability,
+      },
+    ],
+    (v) => ({
+      ...v,
+      salary: orZero(v.salary),
+      salary_withheld: orZero(v.salary_withheld),
+      social_insurance: orZero(v.social_insurance),
+      mutual_aid: orZero(v.mutual_aid),
+      side_revenue: orZero(v.side_revenue),
+      side_expenses: orZero(v.side_expenses),
+      side_withheld: orZero(v.side_withheld),
+    }),
+  );
+}
+function editFamily(t) {
+  taxForm(
+    "配偶者",
+    t,
+    [
+      { key: "has_spouse", label: "配偶者がいる", type: "checkbox", value: t.has_spouse },
+      moneyField(
+        t,
+        "spouse_income",
+        "配偶者の合計所得金額",
+        "給与だけなら年収から給与所得控除を引いた額（年収136万円以下なら所得62万円以下）",
+      ),
+      {
+        key: "spouse_birth_year",
+        label: "配偶者の生まれ年",
+        type: "number",
+        value: t.spouse_birth_year ?? "",
+      },
+      {
+        key: "spouse_disability",
+        label: "配偶者の障害",
+        type: "select",
+        options: S.meta.disabilities,
+        value: t.spouse_disability,
+      },
+    ],
+    (v) => ({ ...v, spouse_income: orZero(v.spouse_income) }),
+  );
+}
+function editDependent(t, index) {
+  const d = index === null ? null : t.dependents[index];
+  const f = fields([
+    { key: "name", label: "名前", value: d?.name ?? "", required: true, placeholder: "例: 長男、父" },
+    {
+      key: "relation",
+      label: "続柄",
+      type: "select",
+      options: S.meta.relations,
+      value: d?.relation ?? "child",
+    },
+    {
+      key: "birth_year",
+      label: "生まれ年",
+      type: "number",
+      value: d?.birth_year ?? "",
+      required: true,
+    },
+    {
+      key: "income",
+      label: "合計所得金額",
+      type: "decimal",
+      value: d && !isZero(d.income) ? d.income : "",
+      help: "公的年金だけなら年金収入から公的年金等控除を引いた額",
+    },
+    { key: "cohabiting", label: "同居している", type: "checkbox", value: d?.cohabiting ?? true },
+    {
+      key: "disability",
+      label: "障害",
+      type: "select",
+      options: S.meta.disabilities,
+      value: d?.disability ?? "none",
+    },
+  ]);
+  modal(index === null ? "親族を追加" : `${d.name}を編集`, f.element, {
+    onSubmit: async () => {
+      const v = f.values();
+      const item = { ...v, income: orZero(v.income) };
+      const list = [...t.dependents];
+      if (index === null) list.push(item);
+      else list[index] = item;
+      await saveTax(t, { dependents: list });
+      render();
+    },
+  });
+}
+function editDeductions(t) {
+  taxForm(
+    "控除",
+    t,
+    [
+      moneyField(t, "life_general_new", "一般生命保険料（新）", "2012年以後の契約。控除証明書の金額"),
+      moneyField(t, "life_general_old", "一般生命保険料（旧）", "2011年以前の契約"),
+      moneyField(t, "life_care", "介護医療保険料"),
+      moneyField(t, "life_pension_new", "個人年金保険料（新）"),
+      moneyField(t, "life_pension_old", "個人年金保険料（旧）"),
+      moneyField(t, "earthquake", "地震保険料"),
+      moneyField(t, "medical_paid", "医療費（家族分の合計）"),
+      moneyField(t, "medical_covered", "保険などで補塡された額"),
+      moneyField(
+        t,
+        "self_medication",
+        "セルフメディケーション対象の医薬品",
+        "医療費控除と有利な方が自動で選ばれます",
+      ),
+      moneyField(t, "donation", "ふるさと納税の寄附額", "受領証明書の合計"),
+    ],
+    (v) => Object.fromEntries(Object.entries(v).map(([k, x]) => [k, orZero(x)])),
+  );
+}
+function editHousing(t) {
+  taxForm(
+    "住宅ローン・住民税",
+    t,
+    [
+      moneyField(t, "housing_balance", "住宅ローンの年末残高", "金融機関の残高証明書"),
+      moneyField(
+        t,
+        "housing_limit",
+        "借入限度額",
+        "入居年と住宅の種類で決まります（例: 2024・2025年入居の省エネ基準適合住宅は3,000万円、子育て世帯は4,000万円）。税務署からの申告書で確かめてください",
+      ),
+      { ...moneyField(t, "housing_rate", "控除率（%）", "2022年以後の入居は0.7"), value: t.housing_rate },
+      {
+        ...moneyField(
+          t,
+          "housing_resident_cap",
+          "住民税からの控除上限",
+          "2022年以後の入居は97,500円",
+        ),
+        value: t.housing_resident_cap,
+      },
+      { ...moneyField(t, "per_capita", "住民税の均等割", "森林環境税を含む。多くの市区町村で5,000円"), value: t.per_capita },
+      { key: "name", label: "名前", value: t.name },
+      { key: "memo", label: "メモ", type: "textarea", value: t.memo, wide: true },
+    ],
+    (v) => ({
+      ...v,
+      housing_balance: orZero(v.housing_balance),
+      housing_limit: orZero(v.housing_limit),
+      housing_rate: orZero(v.housing_rate),
+      housing_resident_cap: orZero(v.housing_resident_cap),
+      per_capita: orZero(v.per_capita),
+    }),
+  );
+}
+
+// ----- Life plan -----
+function savePlan(p, patch, done) {
+  return change({ operation: "save_life_plan", life_plan: { ...p, ...patch } }, done);
+}
+function savingsChart(rows) {
+  const W = 720,
+    H = 220,
+    L = 56,
+    B = 24,
+    T = 10;
+  const values = rows.map((r) => Number(r.savings));
+  const max = niceMax(Math.max(...values, 0));
+  const min = -niceMax(Math.max(...values.map((v) => -v), 0));
+  const span = max - (min < 0 ? min : 0) || 1;
+  const y = (v) => T + (H - T - B) * ((max - v) / span);
+  const band = (W - L) / rows.length;
+  const bw = Math.max(2, Math.min(22, band - 4));
+  const svg = s("svg", {
+    class: "chart",
+    viewBox: `0 0 ${W} ${H}`,
+    role: "img",
+    "aria-label": "年末の金融資産",
+  });
+  for (const v of [max, max / 2, 0, min < 0 ? min : null].filter((v) => v !== null)) {
+    svg.append(
+      s("line", { class: "grid", x1: L, x2: W, y1: y(v), y2: y(v) }),
+      s("text", { class: "axis", x: L - 6, y: y(v) + 4, "text-anchor": "end" }, compact(v)),
+    );
+  }
+  rows.forEach((r, i) => {
+    const v = Number(r.savings);
+    const top = y(Math.max(v, 0)),
+      bottom = y(Math.min(v, 0));
+    svg.append(
+      s("rect", {
+        class: v < 0 ? "bar expense" : "bar income",
+        x: L + band * i + (band - bw) / 2,
+        y: top,
+        width: bw,
+        height: Math.max(1, bottom - top),
+      }),
+      s("rect", {
+        class: "hit",
+        x: L + band * i,
+        y: T,
+        width: band,
+        height: H - T - B,
+        onpointermove: (ev) =>
+          tooltip(
+            ev,
+            [
+              ["金融資産", r.savings, "var(--income)"],
+              ["年間収支", r.balance, "var(--text-2)"],
+            ],
+            `${r.year}年`,
+          ),
+        onpointerleave: hideTip,
+      }),
+    );
+    if (rows.length <= 12 || i % Math.ceil(rows.length / 12) === 0)
+      svg.append(
+        s(
+          "text",
+          { class: "axis", x: L + band * i + band / 2, y: H - 6, "text-anchor": "middle" },
+          String(r.year),
+        ),
+      );
+  });
+  return svg;
+}
+RENDER.lifeplan = async () => {
+  const plans = S.book.life_plans;
+  if (!plans.find((p) => p.id === S.planId)) S.planId = plans[0]?.id;
+  const p = plans.find((x) => x.id === S.planId);
+  const ro = S.readonly;
+  const bar = h(
+    "div",
+    { class: "toolbar" },
+    plans.length
+      ? h(
+          "select",
+          {
+            "aria-label": "ライフプラン",
+            onchange: (e) => ((S.planId = Number(e.target.value)), render()),
+          },
+          plans.map((x) => h("option", { value: x.id, selected: x.id === S.planId }, x.name)),
+        )
+      : null,
+    p ? h("button", { disabled: ro, onclick: () => editPlan(p) }, "設定...") : null,
+    p
+      ? h(
+          "button",
+          {
+            disabled: ro,
+            onclick: async () => {
+              const r = await savePlan(p, { id: 0, name: `${p.name}（提案）` }, "複製しました");
+              S.compareId = p.id;
+              S.planId = r.id;
+              render();
+            },
+          },
+          "複製",
+        )
+      : null,
+    p ? h("button", { onclick: () => exportPlan(p) }, "CSVで保存") : null,
+    h("span", { class: "spacer" }),
+    p ? h("button", { disabled: ro, onclick: () => remove("life_plan", p.id) }, "削除") : null,
+    h("button", { disabled: ro, onclick: () => draftPlan() }, "帳簿から作成..."),
+    h("button", { class: "primary", disabled: ro, onclick: () => editPlan(null) }, "新しいプラン..."),
+  );
+  if (!p)
+    return h(
+      "div",
+      {},
+      bar,
+      h(
+        "div",
+        { class: "card" },
+        h(
+          "p",
+          {},
+          "ライフプラン（キャッシュフロー表）は、家族の年齢・毎年の収入と支出・ライフイベントから、将来の貯蓄残高を年ごとに計算します。",
+        ),
+        h(
+          "p",
+          { class: "muted" },
+          "「帳簿から作成...」で直近12か月の収支と預金残高（税額計算があればその手取り）から始められます。",
+        ),
+      ),
+      coefficientCard(),
+    );
+  const others = plans.filter((x) => x.id !== p.id);
+  if (!others.find((x) => x.id === S.compareId)) S.compareId = null;
+  const r = await api(
+    "life_plan_cash_flow",
+    bookArgs({ life_plan_id: p.id, ...(S.compareId ? { compare_id: S.compareId } : {}) }),
+  );
+  const tiles = h(
+    "div",
+    { class: "tiles" },
+    tile(`${p.start_year + p.years - 1}年末の金融資産`, r.final_savings),
+    tile("最も少ない年末残高", r.min_savings, `${r.min_year}年`),
+    tile(
+      "資金が不足する年",
+      String(r.shortfall_years.length),
+      r.shortfall_years.length
+        ? `${r.shortfall_years[0]}〜${r.shortfall_years[r.shortfall_years.length - 1]}年`
+        : "なし",
+    ),
+    tile("期間の収支", decText(dec(r.total_income) - dec(r.total_expense)), `収入 ${fmt(r.total_income)}`),
+  );
+  const rowButtons = (edit, drop) =>
+    h(
+      "td",
+      {},
+      h("button", { disabled: ro, onclick: edit }, "編集"),
+      h("button", { disabled: ro, onclick: drop }, "外す"),
+    );
+  const without = (key, i) => savePlan(p, { [key]: p[key].filter((_, j) => j !== i) }).then(render);
+  const members = h(
+    "div",
+    { class: "card" },
+    h("h2", {}, "家族"),
+    p.members.length
+      ? table(
+          ["名前", "続柄", "生まれ年", `${p.start_year}年の年齢`, ""],
+          p.members.map((m, i) =>
+            h(
+              "tr",
+              {},
+              h("td", {}, m.name),
+              h("td", {}, m.relation),
+              h("td", { class: "num" }, m.birth_year),
+              h("td", { class: "num" }, p.start_year - m.birth_year),
+              rowButtons(
+                () => editMember(p, i),
+                () => without("members", i),
+              ),
+            ),
+          ),
+        )
+      : h("p", { class: "muted" }, "家族を入れると、各年の年齢が表に出ます。"),
+    h("button", { disabled: ro, onclick: () => editMember(p, null) }, "家族を追加..."),
+  );
+  const flows = h(
+    "div",
+    { class: "card" },
+    h("h2", {}, "毎年の収支"),
+    p.flows.length
+      ? table(
+          ["名前", "種類", "年額（今の価格）", "期間", "変動率", ""],
+          p.flows.map((f, i) =>
+            h(
+              "tr",
+              {},
+              h("td", {}, f.name),
+              h("td", {}, label("flow_kinds", f.kind)),
+              num(f.amount),
+              h("td", {}, `${f.start_year}〜${f.end_year}年`),
+              h("td", { class: "num" }, `${f.growth_percent}%`),
+              rowButtons(
+                () => editFlow(p, i),
+                () => without("flows", i),
+              ),
+            ),
+          ),
+          { numeric: [2] },
+        )
+      : null,
+    h(
+      "div",
+      { class: "toolbar" },
+      h("button", { disabled: ro, onclick: () => editFlow(p, null) }, "収支を追加..."),
+      h("button", { disabled: ro, onclick: () => educationForm(p) }, "教育費..."),
+      h("button", { disabled: ro, onclick: () => loanForm(p) }, "ローン返済額..."),
+    ),
+  );
+  const events = h(
+    "div",
+    { class: "card" },
+    h("h2", {}, "イベント（1回だけの収支）"),
+    p.events.length
+      ? table(
+          ["年", "名前", "種類", "金額（今の価格）", "変動率", ""],
+          [...p.events.keys()]
+            .sort((a, b) => p.events[a].year - p.events[b].year)
+            .map((i) => {
+              const e = p.events[i];
+              return h(
+                "tr",
+                {},
+                h("td", { class: "num" }, e.year),
+                h("td", {}, e.name),
+                h("td", {}, label("flow_kinds", e.kind)),
+                num(e.amount),
+                h("td", { class: "num" }, `${e.growth_percent}%`),
+                rowButtons(
+                  () => editEvent(p, i),
+                  () => without("events", i),
+                ),
+              );
+            }),
+          { numeric: [3] },
+        )
+      : null,
+    h("button", { disabled: ro, onclick: () => editEvent(p, null) }, "イベントを追加..."),
+  );
+  const head = [
+    "年",
+    ...r.members,
+    ...r.flows.map((f) => f.name),
+    "イベント",
+    "収入",
+    "支出",
+    "年間収支",
+    "運用益",
+    "金融資産",
+  ];
+  const ageCols = r.members.length;
+  const flowCols = r.flows.length;
+  const cf = table(
+    head,
+    r.rows.map((x) =>
+      h(
+        "tr",
+        { class: x.savings.startsWith("-") ? "short" : null },
+        h("td", { class: "num" }, x.year),
+        x.ages.map((a) => h("td", { class: "num" }, a ?? "")),
+        x.values.map((v) => num(isZero(v) ? "" : v)),
+        h("td", {}, x.events.map(([n, v]) => h("div", {}, `${n} ${fmt(v)}`))),
+        num(x.income),
+        num(x.expense),
+        num(x.balance),
+        num(x.investment),
+        num(x.savings, "strong"),
+      ),
+    ),
+    {
+      numeric: [
+        ...Array.from({ length: ageCols + flowCols }, (_, i) => i + 1),
+        ...[1, 2, 3, 4, 5].map((i) => ageCols + flowCols + 1 + i),
+      ],
+    },
+  );
+  const comparison = others.length
+    ? h(
+        "div",
+        { class: "card" },
+        h("h2", {}, "提案との比較"),
+        h(
+          "div",
+          { class: "toolbar" },
+          h(
+            "label",
+            {},
+            "比べるプラン",
+            h(
+              "select",
+              {
+                onchange: (e) => ((S.compareId = idOrNull(e.target.value)), render()),
+              },
+              h("option", { value: "" }, "（選ぶ）"),
+              others.map((x) => h("option", { value: x.id, selected: x.id === S.compareId }, x.name)),
+            ),
+          ),
+        ),
+        r.comparison
+          ? h(
+              "div",
+              {},
+              h(
+                "p",
+                {},
+                `最終年の差（${r.comparison.proposal} − ${r.comparison.base}）: `,
+                h(
+                  "strong",
+                  { class: r.comparison.final_difference.startsWith("-") ? "neg" : "pos" },
+                  fmt(r.comparison.final_difference),
+                ),
+                `　最少残高: ${fmt(r.comparison.base_min)} → ${fmt(r.comparison.proposal_min)}`,
+              ),
+              table(
+                ["年", r.comparison.base, r.comparison.proposal, "差"],
+                r.comparison.rows.map((c) =>
+                  h(
+                    "tr",
+                    {},
+                    h("td", { class: "num" }, c.year),
+                    num(c.base ?? ""),
+                    num(c.proposal ?? ""),
+                    num(c.difference ?? ""),
+                  ),
+                ),
+                { numeric: [1, 2, 3] },
+              ),
+            )
+          : h("p", { class: "muted" }, "「複製」で作った提案（繰上返済・保険の見直しなど）を選ぶと、年末の金融資産を年ごとに比べます。"),
+      )
+    : null;
+  return h(
+    "div",
+    {},
+    bar,
+    tiles,
+    r.notes.length
+      ? h(
+          "div",
+          { class: "card" },
+          h(
+            "ul",
+            { class: "notes" },
+            r.notes.map((n) => h("li", {}, n)),
+          ),
+        )
+      : null,
+    h("div", { class: "card" }, h("h2", {}, "年末の金融資産"), savingsChart(r.rows)),
+    h("div", { class: "card" }, h("h2", {}, "キャッシュフロー表"), cf),
+    comparison,
+    h("div", { class: "grid2" }, members, events),
+    flows,
+    coefficientCard(),
+  );
+};
+async function exportPlan(p) {
+  const r = await api("life_plan_cash_flow", bookArgs({ life_plan_id: p.id, csv: true }));
+  download(new Blob([r.csv], { type: "text/csv; charset=utf-8" }), `${p.name}-キャッシュフロー表.csv`);
+}
+function planYear() {
+  return Number(today().slice(0, 4)) + 1;
+}
+function editPlan(p) {
+  const f = fields([
+    { key: "name", label: "名前", value: p?.name ?? "現状", required: true },
+    { key: "start_year", label: "最初の年", type: "number", value: p?.start_year ?? planYear() },
+    { key: "years", label: "年数", type: "number", value: p?.years ?? 30 },
+    {
+      key: "savings",
+      label: "最初の金融資産",
+      type: "decimal",
+      value: p?.savings ?? "",
+      help: "最初の年の初めの預貯金・投資の合計",
+    },
+    {
+      key: "return_percent",
+      label: "運用利回り（年%）",
+      type: "decimal",
+      value: p?.return_percent ?? "0",
+    },
+    { key: "memo", label: "メモ", type: "textarea", value: p?.memo ?? "", wide: true },
+  ]);
+  modal(p ? "ライフプランの設定" : "新しいライフプラン", f.element, {
+    onSubmit: async () => {
+      const v = f.values();
+      const r = await savePlan(p ?? { members: [], flows: [], events: [] }, {
+        ...v,
+        id: p?.id ?? 0,
+        savings: orZero(v.savings),
+        return_percent: orZero(v.return_percent),
+      });
+      S.planId = r.id;
+      render();
+    },
+  });
+}
+function draftPlan() {
+  const taxes = S.book.tax_returns;
+  const f = fields([
+    { key: "as_of", label: "基準日", type: "date", value: today(), help: "この日までの12か月の収支と、この日の預金残高を使います" },
+    {
+      key: "tax",
+      label: "収入",
+      type: "select",
+      options: [["", "帳簿の収入を使う"], ...taxes.map((t) => [t.id, `「${t.name}」の手取りを使う`])],
+      value: taxes[taxes.length - 1]?.id ?? "",
+    },
+    { key: "name", label: "名前", value: "現状" },
+  ]);
+  modal("帳簿から作成", f.element, {
+    onSubmit: async () => {
+      const v = f.values();
+      const r = await api(
+        "life_plan_draft",
+        bookArgs({ as_of: v.as_of, ...(v.tax ? { tax_return_id: Number(v.tax) } : {}) }),
+      );
+      const saved = await savePlan(r.draft, { name: v.name || r.draft.name }, "作成しました");
+      S.planId = saved.id;
+      render();
+    },
+  });
+}
+function editMember(p, i) {
+  const m = i === null ? null : p.members[i];
+  const f = fields([
+    { key: "name", label: "名前", value: m?.name ?? "", required: true },
+    { key: "relation", label: "続柄", value: m?.relation ?? "", placeholder: "本人・配偶者・長男・父など" },
+    { key: "birth_year", label: "生まれ年", type: "number", value: m?.birth_year ?? "", required: true },
+  ]);
+  modal(m ? `${m.name}を編集` : "家族を追加", f.element, {
+    onSubmit: async () => {
+      const list = [...p.members];
+      if (i === null) list.push(f.values());
+      else list[i] = f.values();
+      await savePlan(p, { members: list });
+      render();
+    },
+  });
+}
+function flowFields(x, p, single) {
+  return [
+    { key: "name", label: "名前", value: x?.name ?? "", required: true },
+    {
+      key: "kind",
+      label: "種類",
+      type: "select",
+      options: S.meta.flow_kinds,
+      value: x?.kind ?? "expense",
+    },
+    {
+      key: "amount",
+      label: single ? "金額（今の価格）" : "年額（今の価格）",
+      type: "decimal",
+      value: x?.amount ?? "",
+      required: true,
+    },
+    ...(single
+      ? [{ key: "year", label: "年", type: "number", value: x?.year ?? p.start_year }]
+      : [
+          { key: "start_year", label: "開始年", type: "number", value: x?.start_year ?? p.start_year },
+          {
+            key: "end_year",
+            label: "終了年",
+            type: "number",
+            value: x?.end_year ?? p.start_year + p.years - 1,
+          },
+        ]),
+    {
+      key: "growth_percent",
+      label: "変動率（年%）",
+      type: "decimal",
+      value: x?.growth_percent ?? "0",
+      help: "物価上昇・昇給など。最初の年から毎年この率で増減します",
+    },
+  ];
+}
+function editFlow(p, i) {
+  const x = i === null ? null : p.flows[i];
+  const f = fields(flowFields(x, p, false));
+  modal(x ? `${x.name}を編集` : "収支を追加", f.element, {
+    onSubmit: async () => {
+      const v = f.values();
+      const item = { ...v, growth_percent: orZero(v.growth_percent) };
+      const list = [...p.flows];
+      if (i === null) list.push(item);
+      else list[i] = item;
+      await savePlan(p, { flows: list });
+      render();
+    },
+  });
+}
+function editEvent(p, i) {
+  const x = i === null ? null : p.events[i];
+  const f = fields(flowFields(x, p, true));
+  modal(x ? `${x.name}を編集` : "イベントを追加", f.element, {
+    onSubmit: async () => {
+      const v = f.values();
+      const item = { ...v, growth_percent: orZero(v.growth_percent) };
+      const list = [...p.events];
+      if (i === null) list.push(item);
+      else list[i] = item;
+      await savePlan(p, { events: list });
+      render();
+    },
+  });
+}
+function educationForm(p) {
+  const school = [
+    ["none", "通わない・含めない"],
+    ["public", "公立（大学は国公立）"],
+    ["private", "私立"],
+  ];
+  const stages = S.meta.education;
+  const child = p.members.find((m) => /子|男|女|娘|息子/.test(m.relation + m.name));
+  const f = fields([
+    { key: "child", label: "子の名前", value: child?.name ?? "", required: true },
+    { key: "birth_year", label: "生まれ年", type: "number", value: child?.birth_year ?? "", required: true },
+    ...stages.map((st, i) => ({
+      key: "s" + i,
+      label: `${st.label}（${st.first_age}〜${st.last_age}歳）`,
+      type: "select",
+      options: school,
+      value: i === 0 ? "none" : "public",
+      help: `年額の目安 公立 ${fmt(String(st.public))} / 私立 ${fmt(String(st.private))}`,
+    })),
+    { key: "growth_percent", label: "教育費の上昇率（年%）", type: "decimal", value: "0" },
+  ]);
+  modal("教育費を追加", h("div", {}, f.element, h("p", { class: "muted" }, "幼稚園〜高校は文部科学省「令和5年度子供の学習費調査」、大学は国立大学の標準額と私立大学の平均（文部科学省）による目安です。学校や地域で大きく違うので、追加後に実際の金額へ直してください。")), {
+    onSubmit: async () => {
+      const v = f.values();
+      const r = await api(
+        "fp_calculator",
+        bookArgs({
+          kind: "education",
+          child: v.child,
+          birth_year: v.birth_year,
+          schools: stages.map((_, i) => v["s" + i]),
+          growth_percent: orZero(v.growth_percent),
+        }),
+      );
+      await savePlan(
+        p,
+        { flows: [...p.flows, ...r.flows], events: [...p.events, ...r.events] },
+        `教育費を${r.flows.length}件追加しました`,
+      );
+      render();
+    },
+  });
+}
+function loanForm(p) {
+  const f = fields([
+    { key: "name", label: "名前", value: "住宅ローン返済" },
+    { key: "principal", label: "借入額（残高）", type: "decimal", required: true },
+    { key: "rate", label: "金利（年%）", type: "decimal", value: "1" },
+    { key: "years", label: "返済期間（年）", type: "number", value: 35 },
+    { key: "start_year", label: "返済開始年", type: "number", value: p.start_year },
+  ]);
+  const result = h("p", { class: "muted" }, "「計算」で毎月・年間の返済額を確かめてから追加します。");
+  const calc = async () => {
+    const v = f.values();
+    const r = await api(
+      "fp_calculator",
+      bookArgs({ kind: "loan", principal: orZero(v.principal), rate: orZero(v.rate), years: v.years }),
+    );
+    put(
+      result,
+      `毎月 ${fmt(r.monthly)} 円・年 ${fmt(r.annual)} 円・総返済 ${fmt(r.total)} 円（利息 ${fmt(r.interest)} 円）`,
+    );
+    return r;
+  };
+  modal("ローン返済額", h("div", {}, f.element, result), {
+    submit: "収支に追加",
+    extra: [
+      h(
+        "button",
+        { type: "button", onclick: () => calc().catch((e) => put(result, e.message)) },
+        "計算",
+      ),
+    ],
+    onSubmit: async () => {
+      const v = f.values();
+      const r = await calc();
+      await savePlan(p, {
+        flows: [
+          ...p.flows,
+          {
+            name: v.name || "ローン返済",
+            kind: "expense",
+            amount: r.annual,
+            start_year: v.start_year,
+            end_year: v.start_year + v.years - 1,
+            growth_percent: "0",
+          },
+        ],
+      });
+      render();
+    },
+  });
+}
+function coefficientCard() {
+  const rate = h("input", { inputmode: "decimal", value: "2", "aria-label": "利率", class: "amount" });
+  const years = h("input", { type: "number", value: "10", "aria-label": "年数", class: "short-num" });
+  const out = h("div");
+  const calc = async () => {
+    try {
+      const c = await api(
+        "fp_calculator",
+        bookArgs({ kind: "coefficients", rate: ascii(rate.value) || "0", years: Number(years.value) }),
+      );
+      put(
+        out,
+        table(
+          ["係数", "値", "使いみち"],
+          [
+            ["終価係数", c.future_value, "今の元本が年数後にいくらになるか"],
+            ["現価係数", c.present_value, "年数後の目標額に今いくら必要か"],
+            ["年金終価係数", c.annuity_future, "毎年の積立が年数後にいくらになるか"],
+            ["減債基金係数", c.sinking_fund, "目標額のために毎年いくら積み立てるか"],
+            ["資本回収係数", c.capital_recovery, "今の元本を取り崩すと毎年いくら受け取れるか（ローンの年返済額）"],
+            ["年金現価係数", c.annuity_present, "毎年の受取を続けるには今いくら必要か"],
+          ].map(([n, v, u]) => h("tr", {}, h("td", {}, n), num(v), h("td", { class: "muted" }, u))),
+          { numeric: [1] },
+        ),
+      );
+    } catch (e) {
+      put(out, h("p", { class: "error" }, e.message));
+    }
+  };
+  calc();
+  return h(
+    "div",
+    { class: "card" },
+    h("h2", {}, "6つの係数"),
+    h(
+      "div",
+      { class: "toolbar" },
+      h("label", {}, "利率（年%）", rate),
+      h("label", {}, "年数", years),
+      h("button", { onclick: calc }, "計算"),
+    ),
+    out,
+  );
+}
 
 // ----- Book management -----
 function newBook() {

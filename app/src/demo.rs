@@ -3,7 +3,7 @@
 use chrono::{Datelike, Months, NaiveDate};
 use serde_json::{Value, json};
 use std::path::Path;
-use yy_accountant::{Book, Change, NewBook, Store};
+use yy_accountant::{Book, Change, NewBook, Store, lifeplan, num, tax};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 struct Demo<'a> {
@@ -283,6 +283,139 @@ fn household(store: &mut Store, today: NaiveDate) -> Result<()> {
     }
     lines.push(json!({"account":d.code("401"),"amounts":(1..=12).map(|m| if m == 6 || m == 12 {"768000"} else {"318000"}).collect::<Vec<_>>()}));
     d.apply(json!({"operation":"save_budget","budget":{"name":format!("{fy}年 家計予算"),"fiscal_year":fy,"lines":lines,"memo":"食費は月3.2万円が目標"}}))?;
+    planning(&mut d, today)
+}
+
+/// 税額計算とライフプランの例：副業のある会社員、妻、高校生の子、同居の父母、住宅ローン、
+/// 保険とふるさと納税。ライフプランは現状と提案（保険の見直しと繰上返済）。
+fn planning(d: &mut Demo, today: NaiveDate) -> Result<()> {
+    let y = today.year();
+    let year = *tax::YEARS
+        .iter()
+        .rev()
+        .find(|t| **t <= y)
+        .unwrap_or(&tax::YEARS[0]);
+    d.apply(json!({"operation":"save_tax_return","tax_return":{
+        "year":year,"memo":"例：会社員（副業あり）・妻・子・同居の父母",
+        "salary":"6000000","salary_withheld":"80000","social_insurance":"870000","mutual_aid":"144000",
+        "side_kind":"miscellaneous","side_revenue":"600000","side_expenses":"200000",
+        "has_spouse":true,"spouse_income":"260000","spouse_birth_year":year - 38,
+        "dependents":[
+            {"name":"長男","relation":"child","birth_year":year - 16,"cohabiting":true},
+            {"name":"父","relation":"parent","birth_year":year - 72,"income":"400000","cohabiting":true},
+            {"name":"母","relation":"parent","birth_year":year - 70,"cohabiting":true}],
+        "life_general_new":"100000","life_care":"40000","earthquake":"30000",
+        "medical_paid":"250000","donation":"30000",
+        "housing_balance":"25000000","housing_limit":"40000000","housing_rate":"0.7",
+        "housing_resident_cap":"97500","per_capita":"5000"}}))?;
+    let start = y + 1;
+    let me = start - 43;
+    let child = start - 17;
+    let (education, entry) = lifeplan::education(&lifeplan::EducationRequest {
+        child: "長男".into(),
+        birth_year: child,
+        schools: [
+            lifeplan::School::None,
+            lifeplan::School::None,
+            lifeplan::School::None,
+            lifeplan::School::Public,
+            lifeplan::School::Private,
+        ],
+        growth_percent: num::Decimal::ONE,
+    })?;
+    let flow = |name: &str, kind: &str, amount: i64, from: i32, to: i32, growth: &str| json!({"name":name,"kind":kind,"amount":amount.to_string(),"start_year":from,"end_year":to,"growth_percent":growth});
+    let mut flows = vec![
+        flow("給与の手取り", "income", 4_900_000, start, me + 64, "1"),
+        flow(
+            "副業の収入（経費控除後）",
+            "income",
+            400_000,
+            start,
+            start + 9,
+            "0",
+        ),
+        flow(
+            "妻のパート収入",
+            "income",
+            1_000_000,
+            start,
+            start + 19,
+            "0",
+        ),
+        flow(
+            "公的年金（夫婦）",
+            "income",
+            2_600_000,
+            me + 65,
+            start + 39,
+            "0",
+        ),
+        flow("基本生活費", "expense", 3_600_000, start, start + 39, "1"),
+        flow(
+            "住宅ローン返済",
+            "expense",
+            1_016_000,
+            start,
+            start + 24,
+            "0",
+        ),
+        flow(
+            "生命保険・医療保険",
+            "expense",
+            240_000,
+            start,
+            start + 19,
+            "0",
+        ),
+        flow(
+            "ふるさと納税（自己負担）",
+            "expense",
+            2_000,
+            start,
+            start + 19,
+            "0",
+        ),
+        flow(
+            "父母の医療・介護費",
+            "expense",
+            400_000,
+            start + 3,
+            start + 14,
+            "2",
+        ),
+    ];
+    flows.extend(education.iter().map(|f| serde_json::to_value(f).unwrap()));
+    let mut events = vec![
+        json!({"year":start + 3,"name":"車の買い替え","kind":"expense","amount":"3000000"}),
+        json!({"year":me + 65,"name":"退職金","kind":"income","amount":"15000000"}),
+    ];
+    events.extend(entry.iter().map(|e| serde_json::to_value(e).unwrap()));
+    let members = json!([
+        {"name":"本人","relation":"本人","birth_year":me},
+        {"name":"妻","relation":"配偶者","birth_year":start - 41},
+        {"name":"長男","relation":"子","birth_year":child},
+        {"name":"父","relation":"父","birth_year":start - 73},
+        {"name":"母","relation":"母","birth_year":start - 71}]);
+    let base = json!({"name":"現状","start_year":start,"years":40,"savings":"4000000","return_percent":"0.5",
+        "memo":"例：手取り・生活費は今の価格。生活費は毎年1%上昇",
+        "members":members,"flows":flows,"events":events});
+    d.apply(json!({"operation":"save_life_plan","life_plan":base}))?;
+    // 提案：保険を月1万円に見直し、浮いた分と預金で2年目に300万円繰上返済して返済期間を4年短縮
+    let mut proposal = base.clone();
+    proposal["name"] = json!("提案（保険見直し・繰上返済）");
+    proposal["memo"] =
+        json!("保険料を年12万円に見直し、2年目に300万円を繰上返済（期間短縮型で4年短縮）");
+    for f in proposal["flows"].as_array_mut().unwrap() {
+        match f["name"].as_str() {
+            Some("生命保険・医療保険") => f["amount"] = json!("120000"),
+            Some("住宅ローン返済") => f["end_year"] = json!(start + 20),
+            _ => {}
+        }
+    }
+    proposal["events"].as_array_mut().unwrap().push(
+        json!({"year":start + 1,"name":"住宅ローン繰上返済","kind":"expense","amount":"3000000"}),
+    );
+    d.apply(json!({"operation":"save_life_plan","life_plan":proposal}))?;
     Ok(())
 }
 
