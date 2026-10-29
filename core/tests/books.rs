@@ -501,3 +501,83 @@ fn invalid_files_and_read_only_are_refused() {
             .is_err()
     );
 }
+
+#[test]
+fn tax_returns_and_life_plans_round_trip_and_old_files_migrate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v1.sqlite3");
+    {
+        // A version 1 file: same tables minus the new ones.
+        let mut store = Store::open(&path, false).unwrap();
+        new_book(&mut store, "household");
+    }
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "DROP TABLE tax_dependents;DROP TABLE tax_returns;DROP TABLE life_plan_members;DROP TABLE life_plan_flows;DROP TABLE life_plan_events;DROP TABLE life_plans;PRAGMA user_version=1;",
+        )
+        .unwrap();
+    }
+    // Read-only keeps the file as it is and shows no tax returns.
+    let mut ro = Store::open(&path, true).unwrap();
+    assert!(ro.get(1).unwrap().tax_returns.is_empty());
+    drop(ro);
+    let mut store = Store::open(&path, false).unwrap();
+    let mut book = store.get(1).unwrap();
+    let id = apply(
+        &mut store,
+        &mut book,
+        json!({"operation":"save_tax_return","tax_return":{"year":2026,"salary":"6000000","social_insurance":"870000",
+            "has_spouse":true,"spouse_income":"260000","spouse_birth_year":1988,
+            "dependents":[{"name":"長男","birth_year":2010,"cohabiting":true},
+                          {"name":"父","relation":"parent","birth_year":1954,"income":"400000","cohabiting":true}],
+            "donation":"30000","housing_balance":"25000000","housing_limit":"40000000","housing_rate":"0.7",
+            "housing_resident_cap":"97500","per_capita":"5000"}}),
+    )
+    .unwrap();
+    let plan = apply(
+        &mut store,
+        &mut book,
+        json!({"operation":"save_life_plan","life_plan":{"name":"現状","start_year":2027,"years":20,"savings":"3000000","return_percent":"1",
+            "members":[{"name":"本人","relation":"本人","birth_year":1985}],
+            "flows":[{"name":"手取り","kind":"income","amount":"5400000","start_year":2027,"end_year":2046},
+                     {"name":"生活費","kind":"expense","amount":"4200000","start_year":2027,"end_year":2046,"growth_percent":"1.5"}],
+            "events":[{"year":2030,"name":"車","kind":"expense","amount":"3000000"}]}}),
+    )
+    .unwrap();
+    drop(store);
+    let mut store = Store::open(&path, false).unwrap();
+    let book = store.get(1).unwrap();
+    let t = book.tax_returns.iter().find(|t| t.id == id).unwrap();
+    assert_eq!(t.name, "2026年分");
+    assert_eq!(t.dependents.len(), 2);
+    assert_eq!(t.housing_rate, n("0.7"));
+    let r = tax::calculate(&book, t).unwrap();
+    assert_eq!(r.total_income.0, n("4360000"));
+    // 2026年分の基礎控除は104万円、住民税は43万円
+    let basic = r.lines.iter().find(|l| l.label == "基礎控除").unwrap();
+    assert_eq!(
+        (basic.income_tax.unwrap().0, basic.resident_tax.unwrap().0),
+        (n("1040000"), n("430000"))
+    );
+    let p = book.life_plans.iter().find(|p| p.id == plan).unwrap();
+    let cf = lifeplan::cash_flow(&book, p).unwrap();
+    assert_eq!(cf.rows.len(), 20);
+    assert_eq!(cf.rows[3].events[0].1.0, n("-3000000"));
+    // An unsupported year and a non-JPY book are refused.
+    let mut wrong = t.clone();
+    wrong.id = 0;
+    wrong.year = 2019;
+    assert!(
+        store
+            .apply(
+                1,
+                book.revision,
+                &Change::SaveTaxReturn {
+                    tax_return: Box::new(wrong),
+                },
+                "test"
+            )
+            .is_err()
+    );
+}

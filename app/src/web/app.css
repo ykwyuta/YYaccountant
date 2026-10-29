@@ -671,3 +671,38 @@ details summary {
 .nowrap {
   white-space: nowrap;
 }
+
+/* Tutorial, tax and life plan */
+.guide .step + .step {
+  border-top: 1px solid var(--grid);
+  margin-top: 12px;
+}
+.guide .try {
+  background: var(--brand-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+.guide .try ol {
+  margin: 6px 0 8px;
+  padding-left: 22px;
+}
+ul.notes {
+  margin: 0;
+  padding-left: 20px;
+}
+ul.notes li + li {
+  margin-top: 4px;
+}
+td.strong {
+  font-weight: 700;
+}
+.toolbar input.amount {
+  width: 90px;
+}
+.toolbar input.short-num {
+  width: 70px;
+}
+p.error {
+  color: var(--bad);
+}

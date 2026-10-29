@@ -2,6 +2,7 @@
 //! each list shows, which forms its buttons open and the [`Change`] a form produces.
 //! Window-independent like `sheets.rs`; every amount is parsed and shown as a decimal.
 use super::form::Field;
+use super::planning;
 use super::sheets::{self, Align, Table, money, side};
 use chrono::{Datelike, NaiveDate};
 use serde_json::Value;
@@ -31,10 +32,12 @@ pub(super) enum Section {
     AccountStats,
     Forecast,
     Audit,
+    Tax,
+    LifePlan,
 }
 use Section::*;
 /// Pages after the four bookkeeping pages, and the views each one switches between.
-pub(super) const GROUPS: [(&str, &[Section]); 7] = [
+pub(super) const GROUPS: [(&str, &[Section]); 9] = [
     ("勘定科目・取引先", &[Accounts, Partners]),
     ("債権・債務", &[Claims]),
     ("予算", &[Budget]),
@@ -44,6 +47,8 @@ pub(super) const GROUPS: [(&str, &[Section]); 7] = [
         &[Materials, Moves, Equipment, Products, Productions],
     ),
     ("統計・予測", &[Monthly, AccountStats, Forecast]),
+    ("税金", &[Tax]),
+    ("ライフプラン", &[LifePlan]),
     ("変更履歴", &[Audit]),
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +89,43 @@ impl Section {
             AccountStats => "科目別の統計",
             Forecast => "支出・収入の予測",
             Audit => "変更履歴",
+            Tax => "税金",
+            LifePlan => "ライフプラン",
+        }
+    }
+    /// Pages whose view selector chooses a record (a budget, a tax year or a plan).
+    pub(super) fn chooser(self) -> Option<&'static str> {
+        match self {
+            Budget => Some("予算"),
+            Tax => Some("年分"),
+            LifePlan => Some("プラン"),
+            _ => None,
+        }
+    }
+    /// Records offered by the view selector of a chooser page, newest first for budgets.
+    pub(super) fn choices(self, book: &Book) -> Vec<(i64, String)> {
+        match self {
+            Budget => {
+                let mut budgets: Vec<(i64, String)> = book
+                    .budgets
+                    .iter()
+                    .map(|x| (x.id, format!("{}（{}年度）", x.name, x.fiscal_year)))
+                    .collect();
+                budgets.sort_by(|a, b| b.1.cmp(&a.1));
+                budgets
+            }
+            Tax => book
+                .tax_returns
+                .iter()
+                .rev()
+                .map(|t| (t.id, t.name.clone()))
+                .collect(),
+            LifePlan => book
+                .life_plans
+                .iter()
+                .map(|p| (p.id, p.name.clone()))
+                .collect(),
+            _ => vec![],
         }
     }
     pub(super) fn spec(self) -> Spec {
@@ -151,6 +193,18 @@ impl Section {
                 ..Default::default()
             },
             Audit => Spec::default(),
+            Tax => Spec {
+                first: Some("親族を追加..."),
+                second: Some("親族を編集..."),
+                detail: true,
+                ..crud("年分を追加...", "入力を編集...", "年分を削除")
+            },
+            LifePlan => Spec {
+                first: Some("項目を追加..."),
+                second: Some("項目を編集..."),
+                detail: true,
+                ..crud("新しいプラン...", "設定...", "プランを削除")
+            },
         }
     }
     /// Default dates for the period controls.
@@ -186,8 +240,10 @@ pub(super) struct Context {
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
     pub flag: bool,
-    /// Budget chosen in the view selector of the budget page.
-    pub budget: Option<i64>,
+    /// Record chosen in the view selector (budget, tax year or life plan).
+    pub chosen: Option<i64>,
+    /// Part chosen in the first step of a two-step form (tax input, plan item).
+    pub part: Option<usize>,
     pub main: Option<i64>,
     pub detail: Option<i64>,
 }
@@ -398,7 +454,7 @@ pub(super) fn view(book: &Book, s: Section, cx: &Context, audit: &[Value]) -> Re
         }
         Budget => {
             let Some(id) = cx
-                .budget
+                .chosen
                 .filter(|id| book.budgets.iter().any(|b| b.id == *id))
             else {
                 return Ok(View {
@@ -815,6 +871,8 @@ pub(super) fn view(book: &Book, s: Section, cx: &Context, audit: &[Value]) -> Re
                 f.notes.join(" ")
             );
         }
+        Tax => return planning::tax_view(book, cx),
+        LifePlan => return planning::plan_view(book, cx),
         Audit => {
             main = Table::new(&[
                 ("日時", 170, L),
@@ -950,6 +1008,9 @@ fn breakdown(b: Option<&cost::CostBreakdown>) -> Table {
 /// What a button does: open a form, or apply a change after confirmation.
 pub(super) enum Prepared {
     Form(String, Vec<Field>),
+    /// Asks which part to edit first (title, label, options); then `prepare` runs again
+    /// with `Context::part` set.
+    Choose(String, &'static str, Vec<String>),
     Confirm(String, Change),
     Apply(Change),
 }
@@ -993,12 +1054,17 @@ fn selected<T>(list: &[T], id: Option<i64>, get: impl Fn(&T) -> i64) -> Result<&
 }
 
 pub(super) fn prepare(book: &Book, s: Section, act: Act, cx: &Context) -> Result<Prepared> {
+    match s {
+        Tax => return planning::tax_prepare(book, act, cx),
+        LifePlan => return planning::plan_prepare(book, act, cx),
+        _ => {}
+    }
     if act == Act::Remove {
         let (target, id) = match s {
             Accounts => (Target::Account, cx.main),
             Partners => (Target::Partner, cx.main),
             Claims => (Target::Claim, cx.main),
-            Budget => (Target::Budget, cx.budget),
+            Budget => (Target::Budget, cx.chosen),
             Plans => (Target::Plan, cx.main),
             Materials => (Target::Material, cx.main),
             Moves => (Target::MaterialMove, cx.main),
@@ -1207,7 +1273,7 @@ pub(super) fn prepare(book: &Book, s: Section, act: Act, cx: &Context) -> Result
             let b = if new {
                 None
             } else {
-                Some(selected(&book.budgets, cx.budget, |b| b.id)?)
+                Some(selected(&book.budgets, cx.chosen, |b| b.id)?)
             };
             let year = cost::fiscal_year_of(book, cx.today);
             Prepared::Form(
@@ -1231,7 +1297,7 @@ pub(super) fn prepare(book: &Book, s: Section, act: Act, cx: &Context) -> Result
             )
         }
         (Budget, Act::First) => {
-            let b = selected(&book.budgets, cx.budget, |b| b.id)?;
+            let b = selected(&book.budgets, cx.chosen, |b| b.id)?;
             let line = cx
                 .main
                 .and_then(|a| b.lines.iter().find(|l| l.account == a));
@@ -1257,7 +1323,7 @@ pub(super) fn prepare(book: &Book, s: Section, act: Act, cx: &Context) -> Result
             Prepared::Form(format!("{}の科目の予算", b.name), fields)
         }
         (Budget, Act::Second) => {
-            let mut b = selected(&book.budgets, cx.budget, |b| b.id)?.clone();
+            let mut b = selected(&book.budgets, cx.chosen, |b| b.id)?.clone();
             let account = cx.main.ok_or("一覧で科目を選んでください")?;
             let before = b.lines.len();
             b.lines.retain(|l| l.account != account);
@@ -1620,6 +1686,11 @@ pub(super) fn finish(
     cx: &Context,
     v: &[String],
 ) -> Result<Change> {
+    match s {
+        Tax => return planning::tax_finish(book, act, cx, v),
+        LifePlan => return planning::plan_finish(book, act, cx, v),
+        _ => {}
+    }
     let edit = act == Act::Edit;
     let keep = |list_id: Option<i64>| if edit { list_id.unwrap_or(0) } else { 0 };
     Ok(match (s, act) {
@@ -1685,7 +1756,7 @@ pub(super) fn finish(
             opening: v.get(12).and_then(|x| id(x)),
         },
         (Budget, Act::First) => {
-            let mut b = selected(&book.budgets, cx.budget, |b| b.id)?.clone();
+            let mut b = selected(&book.budgets, cx.chosen, |b| b.id)?.clone();
             let account = id(&v[0]).ok_or("科目を選んでください")?;
             let same = opt_dec(&v[1])?;
             let amounts = (0..12)
@@ -1704,7 +1775,7 @@ pub(super) fn finish(
             let old = book
                 .budgets
                 .iter()
-                .find(|b| edit && Some(b.id) == cx.budget);
+                .find(|b| edit && Some(b.id) == cx.chosen);
             Change::SaveBudget {
                 budget: Budget {
                     id: old.map(|b| b.id).unwrap_or(0),
@@ -1846,7 +1917,8 @@ mod tests {
             from: Some(today),
             to: None,
             flag: false,
-            budget: None,
+            chosen: None,
+            part: None,
             main: None,
             detail: None,
         }
@@ -2010,7 +2082,7 @@ mod tests {
         )
         .unwrap();
         apply(&mut book, change);
-        cx.budget = Some(book.budgets[0].id);
+        cx.chosen = Some(book.budgets[0].id);
         let mut line = vec![rent.to_string(), "80,000".to_string()];
         line.extend(std::iter::repeat_n(String::new(), 12));
         let change = finish(&book, Budget, Act::First, &cx, &line).unwrap();

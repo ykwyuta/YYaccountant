@@ -479,7 +479,7 @@ pub fn statistics(book: &Book, from: NaiveDate, to: NaiveDate) -> Result<Statist
     })
 }
 
-fn csv_cell(s: &str) -> String {
+pub(crate) fn csv_cell(s: &str) -> String {
     let s = if s.starts_with(['=', '+', '-', '@']) && num::parse(s).is_err() {
         format!("'{s}")
     } else {

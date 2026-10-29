@@ -16,14 +16,23 @@ pub(super) enum Align {
 #[derive(Debug, Default)]
 pub(super) struct Table {
     /// Heading, width in 96-DPI pixels and alignment.
-    pub columns: Vec<(&'static str, i32, Align)>,
+    pub columns: Vec<(String, i32, Align)>,
     /// Record ID (entry, line index or account; 0 for totals) and cells.
     pub rows: Vec<(i64, Vec<String>)>,
 }
 impl Table {
     pub(super) fn new(columns: &[(&'static str, i32, Align)]) -> Self {
+        Self::with(
+            columns
+                .iter()
+                .map(|(t, w, a)| (t.to_string(), *w, *a))
+                .collect(),
+        )
+    }
+    /// Columns whose headings depend on the data (names of family members or flows).
+    pub(super) fn with(columns: Vec<(String, i32, Align)>) -> Self {
         Self {
-            columns: columns.to_vec(),
+            columns,
             rows: vec![],
         }
     }

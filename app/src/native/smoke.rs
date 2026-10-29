@@ -594,6 +594,7 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
     )?;
 
     records(h, log)?;
+    planning(h, directory, log)?;
 
     // Layout at the minimum and a large size, on every page; screenshots at the large size.
     let mut shots = 0;
@@ -828,7 +829,7 @@ fn records(h: HWND, log: &mut Vec<String>) -> Result<()> {
         "6か月の予測と科目ごとの方法を表示",
         log,
     )?;
-    menu(h, page(6));
+    menu(h, page(8));
     let id = book()?.id;
     let audit = state(|s| s.store.audit(id, 0).map(|a| a.len()))??;
     check(
@@ -942,6 +943,216 @@ fn records(h: HWND, log: &mut Vec<String>) -> Result<()> {
     check(
         left.is_empty(),
         &format!("記録の画面で想定外のメッセージなし {left:?}"),
+        log,
+    )?;
+    Ok(())
+}
+
+/// Tax and life plan pages, the tutorial and the six coefficients (household book).
+fn planning(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
+    let page = |n: usize| ID_PAGE + (RECORDS + n) as u16;
+    menu(h, page(6));
+    check(
+        summary()?.contains("年分を追加"),
+        "税金：年分がないときの案内",
+        log,
+    )?;
+    fill(&[("年分", "2026")]);
+    click(h, ID_G_NEW)?;
+    check(
+        book()?.tax_returns.len() == 1 && summary()?.contains("2026年分"),
+        "年分を追加して選ぶ",
+        log,
+    )?;
+    // Two-step forms: the part, then that part's fields.
+    for values in [
+        &[
+            ("編集する入力", "収入（給与）"),
+            ("給与の支払金額（源泉徴収票）", "6,000,000"),
+            ("源泉徴収税額", "80000"),
+            ("社会保険料（家族分を含む）", "870000"),
+        ][..],
+        &[
+            ("編集する入力", "副業"),
+            ("副業の種類", "雑所得"),
+            ("副業の収入", "600000"),
+            ("副業の経費", "200000"),
+        ],
+        &[
+            ("編集する入力", "配偶者"),
+            ("配偶者", "いる"),
+            ("配偶者の合計所得金額", "260000"),
+            ("配偶者の生まれ年", "1988"),
+        ],
+        &[
+            ("編集する入力", "保険料"),
+            ("一般生命保険料（新）", "100000"),
+            ("介護医療保険料", "40000"),
+            ("地震保険料", "30000"),
+        ],
+        &[
+            ("編集する入力", "医療費"),
+            ("医療費（家族分の合計）", "250000"),
+            ("ふるさと納税の寄附額", "50000"),
+        ],
+        &[
+            ("編集する入力", "住宅ローン"),
+            ("住宅ローンの年末残高", "25000000"),
+            ("借入限度額", "40000000"),
+        ],
+    ] {
+        fill(values);
+        click(h, ID_G_EDIT)?;
+    }
+    for (name, relation, born, income) in [
+        ("長男", "子", "2010", ""),
+        ("父", "父母", "1954", "400000"),
+        ("母", "父母", "1956", ""),
+    ] {
+        fill(&[
+            ("名前（例: 長男、父）", name),
+            ("続柄", relation),
+            ("生まれ年", born),
+            ("合計所得金額", income),
+        ]);
+        click(h, ID_G_FIRST)?;
+    }
+    let t = book()?.tax_returns[0].clone();
+    check(
+        t.salary == num::parse("6000000").unwrap()
+            && t.side_kind == yy_accountant::tax::SideKind::Miscellaneous
+            && t.has_spouse
+            && t.dependents.len() == 3
+            && t.dependents[1].cohabiting,
+        "収入・副業・配偶者・保険・医療費・寄附・住宅ローン・親族3人を入力",
+        log,
+    )?;
+    // Same household as the core test: refund 80,000, resident tax 87,500.
+    let donation = find_row(ID_G_LIST, 1, "寄附金税額控除")?;
+    check(
+        summary()?.contains("還付 80,000")
+            && summary()?.contains("住民税 87,500")
+            && cell(handle(ID_G_LIST)?, donation, 3) == "-34,360"
+            && rows(ID_G_DETAIL)? == 3,
+        "所得税の還付80,000・住民税87,500・ふるさと納税の税額控除34,360",
+        log,
+    )?;
+    check(
+        find_row(ID_G_LIST, 0, "注意").is_ok(),
+        "確定申告の要否などの注意を表示",
+        log,
+    )?;
+    select(ID_G_DETAIL, find_row(ID_G_DETAIL, 0, "母")?)?;
+    fill(&[("外す", "はい")]);
+    click(h, ID_G_SECOND)?;
+    check(
+        book()?.tax_returns[0].dependents.len() == 2,
+        "親族を外す",
+        log,
+    )?;
+
+    // Life plan from the book and the tax year's take-home pay, then a proposal.
+    menu(h, page(7));
+    check(
+        summary()?.contains("新しいプラン"),
+        "ライフプラン：プランがないときの案内",
+        log,
+    )?;
+    fill(&[
+        ("名前", "現状"),
+        ("作り方", "帳簿から"),
+        ("帳簿から作るときの収入", "手取り"),
+        ("最初の年", "2027"),
+        ("年数", "20"),
+    ]);
+    click(h, ID_G_NEW)?;
+    let plan = book()?.life_plans[0].clone();
+    check(
+        rows(ID_G_LIST)? == 20
+            && plan.flows.iter().any(|f| f.name.contains("税額計算"))
+            && plan.flows.iter().all(|f| f.start_year == 2027),
+        "帳簿と税額計算の手取りから20年のキャッシュフロー表",
+        log,
+    )?;
+    for values in [
+        &[
+            ("追加する項目", "家族"),
+            ("名前", "長男"),
+            ("続柄（本人・配偶者・長男など）", "長男"),
+            ("生まれ年", "2010"),
+        ][..],
+        &[
+            ("追加する項目", "教育費"),
+            ("高校", "公立"),
+            ("大学", "私立"),
+        ],
+        &[
+            ("追加する項目", "ローン"),
+            ("借入額（残高）", "30000000"),
+            ("金利（年%）", "1"),
+            ("返済期間（年）", "35"),
+        ],
+        &[
+            ("追加する項目", "イベント"),
+            ("名前", "車の買い替え"),
+            ("金額（今の価格）", "3000000"),
+            ("年", "2030"),
+        ],
+    ] {
+        fill(values);
+        click(h, ID_G_FIRST)?;
+    }
+    let plan = book()?.life_plans[0].clone();
+    check(
+        plan.members.len() == 1
+            && plan.flows.iter().any(|f| f.name == "長男の大学（私立）")
+            && plan
+                .flows
+                .iter()
+                .any(|f| f.name == "住宅ローン返済" && f.amount == num::parse("1016232").unwrap())
+            && plan.events.len() == 2
+            && find_row(ID_G_LIST, 0, "2030").is_ok(),
+        "家族・教育費（進路から）・ローン返済額（年1,016,232）・イベントを追加",
+        log,
+    )?;
+    fill(&[("名前", "提案"), ("作り方", "複製")]);
+    click(h, ID_G_NEW)?;
+    select(ID_G_DETAIL, find_row(ID_G_DETAIL, 1, "車の買い替え")?)?;
+    fill(&[("外す", "はい")]);
+    click(h, ID_G_SECOND)?;
+    check(
+        book()?.life_plans.len() == 2 && summary()?.contains("「現状」との差 3,000,000"),
+        "複製した提案から車の買い替えを外し、現状との差3,000,000",
+        log,
+    )?;
+    let csv = directory.join("plan.csv");
+    SMOKE_FILE.with(|f| *f.borrow_mut() = Some(csv.clone()));
+    menu(h, ID_PLAN_CSV);
+    let text = std::fs::read_to_string(&csv).unwrap_or_default();
+    check(
+        text.starts_with("\u{feff}年,長男（歳）") && text.lines().count() == 21,
+        "キャッシュフロー表をCSVで保存",
+        log,
+    )?;
+    fill(&[("利率（年%）", "2"), ("年数", "10")]);
+    menu(h, ID_COEFFICIENTS);
+    menu(h, ID_TUTORIAL);
+    let shown = messages();
+    check(
+        shown.iter().any(|m| m.contains("終価係数 1.218994"))
+            && shown.iter().any(|m| {
+                m.starts_with("チュートリアル")
+                    && m.rsplit(' ')
+                        .next()
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .is_some_and(|n| n > 3000)
+            }),
+        "6つの係数とチュートリアルを表示",
+        log,
+    )?;
+    check(
+        shown.len() == 2,
+        &format!("想定外のメッセージなし {shown:?}"),
         log,
     )?;
     Ok(())

@@ -49,6 +49,27 @@ pub fn text(d: Decimal) -> String {
     d.normalize().to_string()
 }
 
+/// Thousands separators on the integer part (e.g. `-1,234,567.5`), for messages.
+pub fn grouped(d: Decimal) -> String {
+    let t = text(d);
+    let (sign, rest) = t.strip_prefix('-').map_or(("", t.as_str()), |r| ("-", r));
+    let (int, frac) = rest
+        .split_once('.')
+        .map_or((rest, None), |(i, f)| (i, Some(f)));
+    let mut out = String::from(sign);
+    for (i, c) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if let Some(f) = frac {
+        out.push('.');
+        out.push_str(f);
+    }
+    out
+}
+
 /// Fixed number of fraction digits, for display and CSV.
 pub fn fixed(d: Decimal, digits: u32) -> String {
     let mut r = d.round_dp_with_strategy(digits, RoundingStrategy::MidpointAwayFromZero);
@@ -283,6 +304,8 @@ mod tests {
             Decimal::from(3)
         );
         assert_eq!(fixed(parse("12").unwrap(), 2), "12.00");
+        assert_eq!(grouped(parse("-1234567.5").unwrap()), "-1,234,567.5");
+        assert_eq!(grouped(parse("999").unwrap()), "999");
     }
     #[test]
     fn statistics_are_decimal() {

@@ -16,10 +16,11 @@ use windows::{
 };
 use yy_accountant::{
     Book, BookInfo, BookKind, Change, Entry, Error as CoreError, Line, NewBook, QuickEntry,
-    QuickKind, Store, num::Rounding, reports,
+    QuickKind, Store, lifeplan, num::Rounding, reports, tutorial,
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod form;
+mod planning;
 mod records;
 mod sheets;
 mod smoke;
@@ -34,7 +35,7 @@ thread_local! {static SMOKE_FILE:RefCell<Option<PathBuf>>=const{RefCell::new(Non
 // Lets the smoke test go below the minimum size, as a small screen at a high scale does.
 thread_local! {static SMOKE_MIN_SIZE:std::cell::Cell<Option<(i32,i32)>>=const{std::cell::Cell::new(None)};}
 
-const PAGES: [&str; 11] = [
+const PAGES: [&str; 13] = [
     "かんたん入力",
     "仕訳帳",
     "仕訳入力",
@@ -45,6 +46,8 @@ const PAGES: [&str; 11] = [
     "計画",
     "原価管理",
     "統計・予測",
+    "税金",
+    "ライフプラン",
     "変更履歴",
 ];
 /// Pages from here on are record pages (`records::GROUPS`) sharing one set of controls.
@@ -63,12 +66,15 @@ const ID_DEMO: u16 = 13;
 const ID_BACKUP: u16 = 14;
 const ID_CSV: u16 = 15;
 const ID_EXIT: u16 = 16;
+const ID_PLAN_CSV: u16 = 17;
 const ID_NEW_BOOK: u16 = 20;
 const ID_SETTINGS: u16 = 21;
 const ID_REFRESH: u16 = 22;
 const ID_ABOUT: u16 = 30;
 const ID_NEXT_PAGE: u16 = 31;
 const ID_PREV_PAGE: u16 = 32;
+const ID_TUTORIAL: u16 = 33;
+const ID_COEFFICIENTS: u16 = 34;
 const ID_PAGE: u16 = 40;
 
 const ID_BOOK: u16 = 100;
@@ -143,13 +149,16 @@ const RECORD_BUTTONS: [(u16, Act); 5] = [
 ];
 
 /// Menu commands that ask for input (a file or a form) before using the state.
-const DIALOGS: [u16; 10] = [
+const DIALOGS: [u16; 13] = [
     ID_OPEN,
     ID_OPEN_READ_ONLY,
     ID_NEW_DATABASE,
     ID_DEMO,
     ID_BACKUP,
     ID_CSV,
+    ID_PLAN_CSV,
+    ID_TUTORIAL,
+    ID_COEFFICIENTS,
     ID_EXIT,
     ID_NEW_BOOK,
     ID_SETTINGS,
@@ -195,7 +204,7 @@ struct State {
     book: Option<Book>,
     page: usize,
     controls: BTreeMap<u16, Control>,
-    headings: BTreeMap<u16, Vec<&'static str>>,
+    headings: BTreeMap<u16, Vec<String>>,
     /// Lines of the compound entry being written.
     draft: Vec<Line>,
     /// Draft line loaded for correction.
@@ -503,7 +512,7 @@ impl State {
     fn fill_table(&mut self, id: u16, table: &Table, keep: Option<i64>) {
         let h = self.c(id);
         send(h, WM_SETREDRAW, 0, 0);
-        let headings: Vec<&'static str> = table.columns.iter().map(|c| c.0).collect();
+        let headings: Vec<String> = table.columns.iter().map(|c| c.0.clone()).collect();
         if self.headings.get(&id) != Some(&headings) {
             while send(h, LVM_DELETECOLUMN, 0, 0).0 != 0 {}
             for (i, (title, width, align)) in table.columns.iter().enumerate() {
@@ -1347,8 +1356,10 @@ impl State {
     }
     fn section(&self) -> Section {
         let group = self.group();
-        if group == [Section::Budget] {
-            return Section::Budget;
+        if let [only] = group
+            && only.chooser().is_some()
+        {
+            return *only;
         }
         let index = self.views.get(&self.page).copied().unwrap_or(0) as usize;
         group[index.min(group.len() - 1)]
@@ -1357,7 +1368,7 @@ impl State {
         let spec = self.section().spec();
         let field = if id > LABEL { id - LABEL } else { id };
         match field {
-            ID_G_VIEW => self.group().len() > 1 || self.section() == Section::Budget,
+            ID_G_VIEW => self.group().len() > 1 || self.section().chooser().is_some(),
             ID_G_FROM => spec.from.is_some(),
             ID_G_TO => spec.to,
             ID_G_FLAG => spec.flag.is_some(),
@@ -1375,19 +1386,12 @@ impl State {
     fn setup_records(&mut self, reset: bool) {
         let section = self.section();
         let view = self.c(ID_G_VIEW);
-        let items: Vec<(i64, String)> = if section == Section::Budget {
-            let mut budgets: Vec<(i64, String)> = self
-                .book
+        let chooser = section.chooser();
+        let items: Vec<(i64, String)> = if chooser.is_some() {
+            self.book
                 .as_ref()
-                .map(|b| {
-                    b.budgets
-                        .iter()
-                        .map(|x| (x.id, format!("{}（{}年度）", x.name, x.fiscal_year)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            budgets.sort_by(|a, b| b.1.cmp(&a.1));
-            budgets
+                .map(|b| section.choices(b))
+                .unwrap_or_default()
         } else {
             self.group()
                 .iter()
@@ -1397,20 +1401,13 @@ impl State {
         };
         let keep = self.views.get(&self.page).copied();
         fill_combo(view, &items, keep);
-        if section == Section::Budget {
+        if chooser.is_some() {
             match combo_value(view) {
                 Some(v) => self.views.insert(self.page, v),
                 None => self.views.remove(&self.page),
             };
         }
-        set_text(
-            self.c(ID_G_VIEW + LABEL),
-            if section == Section::Budget {
-                "予算"
-            } else {
-                "表示"
-            },
-        );
+        set_text(self.c(ID_G_VIEW + LABEL), chooser.unwrap_or("表示"));
         let spec = section.spec();
         set_text(self.c(ID_G_FROM + LABEL), spec.from.unwrap_or(""));
         set_text(self.c(ID_G_FLAG), spec.flag.unwrap_or(""));
@@ -1437,15 +1434,17 @@ impl State {
         self.refresh_records();
     }
     fn record_context(&self) -> records::Context {
-        let budget = (self.section() == Section::Budget)
-            .then(|| combo_value(self.c(ID_G_VIEW)))
-            .flatten();
+        let chosen = self
+            .section()
+            .chooser()
+            .and_then(|_| combo_value(self.c(ID_G_VIEW)));
         records::Context {
             today: today(),
             from: get_date(self.c(ID_G_FROM)),
             to: get_date(self.c(ID_G_TO)),
             flag: send(self.c(ID_G_FLAG), BM_GETCHECK, 0, 0).0 == BST_CHECKED.0 as isize,
-            budget,
+            chosen,
+            part: None,
             main: selected_row(self.c(ID_G_LIST)).map(|r| r.1),
             detail: selected_row(self.c(ID_G_DETAIL)).map(|r| r.1),
         }
@@ -1561,7 +1560,12 @@ impl State {
         self.record_apply(section, change)
     }
     fn record_apply(&mut self, section: Section, change: Change) -> Result<()> {
-        let created = matches!(&change, Change::SaveBudget { budget } if budget.id == 0);
+        let created = match &change {
+            Change::SaveBudget { budget } => budget.id == 0,
+            Change::SaveTaxReturn { tax_return } => tax_return.id == 0,
+            Change::SaveLifePlan { life_plan } => life_plan.id == 0,
+            _ => false,
+        };
         let id = self.apply(change)?;
         if created && let Some(id) = id {
             self.views.insert(self.page, id);
@@ -1681,11 +1685,27 @@ fn confirm(h: HWND, question: &str) -> bool {
 }
 /// A button of a record page: a form or a confirmation first, then the change.
 fn record_action(h: HWND, act: Act) {
-    let (section, cx, prepared) = match with(|s| s.record_prepare(act)) {
+    let (section, mut cx, mut prepared) = match with(|s| s.record_prepare(act)) {
         Some(Ok(p)) => p,
         Some(Err(e)) => return message(h, &e.to_string(), true),
         None => return,
     };
+    // Two-step forms: choose the part, then prepare that part's form.
+    if let Prepared::Choose(title, label, options) = prepared {
+        let Some(values) = form::show(h, &title, vec![form::Field::Choice(label, options, 0)])
+        else {
+            return;
+        };
+        cx.part = Some(values[0].parse().unwrap_or(0));
+        prepared = match with(|s| {
+            s.book()
+                .and_then(|b| records::prepare(b, section, act, &cx))
+        }) {
+            Some(Ok(p)) => p,
+            Some(Err(e)) => return message(h, &e.to_string(), true),
+            None => return,
+        };
+    }
     let outcome = match prepared {
         Prepared::Form(title, fields) => match form::show(h, &title, fields) {
             Some(values) => with(|s| s.record_finish(section, act, &cx, &values)),
@@ -1699,6 +1719,7 @@ fn record_action(h: HWND, act: Act) {
             }
         }
         Prepared::Apply(change) => with(|s| s.record_apply(section, change)),
+        Prepared::Choose(..) => None,
     };
     report(h, outcome);
 }
@@ -1781,6 +1802,68 @@ fn menu_command(h: HWND, id: u16) {
                     Ok(())
                 });
                 report(h, outcome);
+            }
+        }
+        ID_PLAN_CSV => {
+            let plan = with(|s| -> Result<(String, String)> {
+                let book = s.book()?;
+                let id = (s.section() == Section::LifePlan)
+                    .then(|| combo_value(s.c(ID_G_VIEW)))
+                    .flatten()
+                    .or_else(|| book.life_plans.first().map(|p| p.id))
+                    .ok_or("ライフプランがありません")?;
+                let p = book
+                    .life_plans
+                    .iter()
+                    .find(|p| p.id == id)
+                    .ok_or("ライフプランがありません")?;
+                let csv = lifeplan::csv(book, &lifeplan::cash_flow(book, p)?);
+                Ok((format!("{}-キャッシュフロー表.csv", p.name), csv))
+            });
+            match plan {
+                Some(Ok((name, csv))) => {
+                    if let Some(path) = choose_file(
+                        h,
+                        true,
+                        "キャッシュフロー表を保存",
+                        "CSV (*.csv)|*.csv",
+                        &name,
+                    ) {
+                        let outcome =
+                            std::fs::write(&path, csv)
+                                .map_err(|e| e.into())
+                                .and_then(|()| {
+                                    with(|s| {
+                                        s.note = format!("{} に保存しました", path.display());
+                                        s.update_status();
+                                    })
+                                    .ok_or_else(|| "busy".into())
+                                });
+                        report(h, Some(outcome));
+                    }
+                }
+                Some(Err(e)) => message(h, &e.to_string(), true),
+                None => {}
+            }
+        }
+        ID_TUTORIAL => form::show_text(
+            h,
+            "チュートリアル：家計簿・税金・ライフプラン",
+            &tutorial::text(),
+        ),
+        ID_COEFFICIENTS => {
+            if let Some(v) = form::show(
+                h,
+                "6つの係数",
+                vec![
+                    form::Field::Text("利率（年%）", "2".into()),
+                    form::Field::Text("年数", "10".into()),
+                ],
+            ) {
+                match planning::coefficients_text(&v[0], &v[1]) {
+                    Ok(text) => message(h, &text, false),
+                    Err(e) => message(h, &e.to_string(), true),
+                }
             }
         }
         ID_NEW_BOOK => new_book(h),
@@ -2001,6 +2084,7 @@ fn menu() -> Result<HMENU> {
                 (0, ""),
                 (ID_BACKUP, "バックアップ(&B)..."),
                 (ID_CSV, "仕訳CSVを保存(&C)..."),
+                (ID_PLAN_CSV, "キャッシュフロー表をCSVで保存(&L)..."),
                 (0, ""),
                 (ID_EXIT, "終了(&X)"),
             ],
@@ -2033,11 +2117,21 @@ fn menu() -> Result<HMENU> {
             )?;
         }
         let help = CreatePopupMenu()?;
-        add(help, &[(ID_ABOUT, "YYaccountantについて(&A)")])?;
+        let tools = CreatePopupMenu()?;
+        add(tools, &[(ID_COEFFICIENTS, "6つの係数(&K)...")])?;
+        add(
+            help,
+            &[
+                (ID_TUTORIAL, "チュートリアル(&T)"),
+                (0, ""),
+                (ID_ABOUT, "YYaccountantについて(&A)"),
+            ],
+        )?;
         for (popup, title) in [
             (file, "ファイル(&F)"),
             (book, "帳簿(&B)"),
             (view, "表示(&V)"),
+            (tools, "ツール(&T)"),
             (help, "ヘルプ(&H)"),
         ] {
             AppendMenuW(bar, MF_POPUP, popup.0 as usize, &HSTRING::from(title))?;

@@ -50,7 +50,7 @@ def main():
             tool(4, "account_guide", {"book_id": 1, "query": "スーパーで食材"}),
         ])
         assert rows[1]["result"]["protocolVersion"] == "2025-11-25"
-        assert len(rows[2]["result"]["tools"]) == 16
+        assert len(rows[2]["result"]["tools"]) == 21
         accounts = {a["code"]: a["id"] for a in data(rows, 3)["accounts"]}
         assert data(rows, 4)["suggestions"][0]["code"] == "501"
         food, bank, card = accounts["501"], accounts["111"], accounts["201"]
@@ -107,6 +107,14 @@ def main():
             tool(47, "budget_report", {"book_id": 1, "budget_id": 1}),
             tool(48, "plan_calendar", {"book_id": 1, "from": "2026-10-01", "to": "2027-01-31"}),
             tool(49, "report", {"book_id": 2, "kind": "income_statement", "from": "2026-01-01", "to": "2026-10-29"}),
+            tool(50, "tax_calculate", {"book_id": 1, "tax_return_id": 1}),
+            tool(51, "life_plan_cash_flow", {"book_id": 1, "life_plan_id": 1, "compare_id": 2, "csv": True}),
+            tool(52, "life_plan_draft", {"book_id": 1, "as_of": "2026-10-29", "tax_return_id": 1}),
+            tool(53, "fp_calculator", {"book_id": 1, "kind": "coefficients", "rate": "2", "years": 10}),
+            tool(54, "fp_calculator", {"book_id": 1, "kind": "loan", "principal": "30000000", "rate": "1", "years": 35}),
+            tool(55, "tutorial", {}),
+            tool(56, "tax_calculate", {"book_id": 1, "tax_return": {"year": 2026, "salary": "1780000"}}),
+            tool(57, "tax_calculate", {"book_id": 1, "tax_return": {"year": 2019, "salary": "1"}}),
         ])
         assert [b["kind"] for b in data(rows, 40)["books"]] == ["household", "sole_proprietor"]
         for i in (41, 46):
@@ -124,7 +132,31 @@ def main():
         assert all(Decimal(s["quantity"]) >= 0 for s in cost["stock"]), cost["stock"]
         assert data(rows, 47)["rows"]
         assert any(not o["posted"] for o in data(rows, 48)["occurrences"])
+        # Salary 6,000,000, side job 400,000, wife, son 16, parents 72 and 70 living together,
+        # iDeCo, insurance, medical 250,000, furusato 30,000 and a mortgage (2026 rules).
+        tax = data(rows, 50)
+        line = {l["label"]: l for l in tax["lines"]}
+        assert tax["total_income"] == "4760000", tax["total_income"]
+        assert line["基礎控除"]["income_tax"] == "1040000" and line["基礎控除"]["resident_tax"] == "430000"
+        assert line["扶養控除（父）"]["income_tax"] == "580000"
+        assert Decimal(tax["balance_due"]) == Decimal("-80000") and tax["filing_required"]
+        # The mortgage credit already removes the income tax, so the donation costs more than 2,000.
+        assert Decimal(tax["donation_cost"]) == Decimal("4800"), tax["donation_cost"]
+        assert any("実質負担が 4,800 円" in n for n in tax["notes"]), tax["notes"]
+        assert Decimal(tax["donation_limit"]) > Decimal("30000")
+        plan = data(rows, 51)
+        assert len(plan["rows"]) == 40 and plan["csv"].startswith("\ufeff年,本人")
+        assert Decimal(plan["comparison"]["final_difference"]) > 0
+        draft = data(rows, 52)
+        assert draft["draft"]["flows"][0]["name"] == "手取り収入（税額計算から）"
+        assert data(rows, 53)["future_value"] == "1.218994"
+        assert data(rows, 54)["monthly"] == "84686"
+        assert len(data(rows, 55)["chapters"]) == 3
+        assert data(rows, 56)["income_tax"] == "0"  # 178万円の壁（令和8年分）
+        assert rows[57]["result"]["isError"] and "対応していません" in rows[57]["result"]["content"][0]["text"]
         print(json.dumps({
+            "tax_2026": {k: tax[k] for k in ("income_tax", "balance_due", "resident_tax", "take_home", "donation_limit")},
+            "life_plan": {k: plan[k] for k in ("final_savings", "min_savings", "min_year", "shortfall_years")},
             "household_forecast": forecast["totals"][:3],
             "savings_rate": data(rows, 44)["savings_rate"],
             "bakery_net_income": data(rows, 49)["net_income"],

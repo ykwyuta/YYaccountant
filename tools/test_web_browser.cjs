@@ -6,7 +6,7 @@ const path = require("path");
 const url = process.env.YYA_URL;
 const password = process.env.YYA_PASSWORD;
 const out = process.env.YYA_OUT || ".";
-const views = ["home", "input", "journal", "accounts", "claims", "budget", "plans", "cost", "stats", "reports", "audit"];
+const views = ["home", "guide", "input", "journal", "accounts", "claims", "budget", "plans", "cost", "stats", "tax", "lifeplan", "reports", "audit"];
 
 (async () => {
   const browser = await chromium.launch();
@@ -92,6 +92,55 @@ const views = ["home", "input", "journal", "accounts", "claims", "budget", "plan
     await page.click('[data-view="plans"]');
     await waitIdle();
     await shot("plans-before-post");
+    // Tutorial links to the screens it explains.
+    await page.click('[data-view="guide"]');
+    await waitIdle();
+    await page.waitForSelector('.guide h2:has-text("2. 税金を計算する")');
+    await page.click('.guide button:has-text("「税金」を開く")');
+    await waitIdle();
+    if ((await page.textContent("#view-title")) !== "税金") throw new Error("tutorial did not open the tax view");
+    // Tax: the demo household (salary, side job, wife, son, parents, mortgage, furusato).
+    const tiles = await page.textContent(".tiles");
+    if (!tiles.includes("所得税の還付") || !tiles.includes("ふるさと納税の上限の目安"))
+      throw new Error("tax tiles: " + tiles);
+    await page.waitForSelector('td:has-text("寄附金税額控除（ふるさと納税）")');
+    await page.click('button:has-text("親族を追加...")');
+    await page.fill("#f-name", "祖母");
+    await page.selectOption("#f-relation", "parent");
+    await page.fill("#f-birth_year", "1940");
+    await page.click('.modal button[type="submit"]');
+    await page.waitForSelector(".modal", { state: "detached" });
+    await waitIdle();
+    await page.waitForSelector('td:has-text("扶養控除（祖母）")');
+    await page.click('button:has-text("控除...")');
+    await page.fill("#f-donation", "20,000");
+    await page.click('.modal button[type="submit"]');
+    await page.waitForSelector(".modal", { state: "detached" });
+    await waitIdle();
+    await page.waitForSelector('.tile:has-text("寄附 20,000 の実質負担")');
+    await shot("tax-edited");
+    // Life plan: compare the proposal with the current plan, add education costs, export CSV.
+    await page.click('[data-view="lifeplan"]');
+    await waitIdle();
+    await page.waitForSelector('h2:has-text("キャッシュフロー表")');
+    await page.selectOption('label:has-text("比べるプラン") select', { label: "提案（保険見直し・繰上返済）" });
+    await waitIdle();
+    await page.waitForSelector('p:has-text("最終年の差")');
+    await page.waitForSelector('.card:has-text("6つの係数") td:has-text("1.218994")');
+    await shot("lifeplan-compare");
+    const flowsBefore = await page.locator('.card:has(h2:has-text("毎年の収支")) tbody tr').count();
+    await page.click('button:has-text("教育費...")');
+    await page.click('.modal button[type="submit"]');
+    await page.waitForSelector('#message:not(.error):has-text("教育費を")');
+    await waitIdle();
+    const flowsAfter = await page.locator('.card:has(h2:has-text("毎年の収支")) tbody tr').count();
+    if (flowsAfter <= flowsBefore) throw new Error(`education flows not added ${flowsBefore} -> ${flowsAfter}`);
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.click('button:has-text("CSVで保存")'),
+    ]);
+    if (!download.suggestedFilename().endsWith("キャッシュフロー表.csv"))
+      throw new Error("csv name " + download.suggestedFilename());
     // Chart tooltip.
     await page.click('[data-view="home"]');
     await waitIdle();
