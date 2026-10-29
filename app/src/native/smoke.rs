@@ -580,7 +580,9 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
 
     // Layout at the minimum and a large size, on every page; screenshots at the large size.
     let mut shots = 0;
-    for (width, height, shoot) in [(860, 600, false), (1400, 900, true)] {
+    // 680x500 is below the minimum: what a 1024x768 screen at 150% leaves (CI runners).
+    SMOKE_MIN_SIZE.with(|m| m.set(Some((560, 400))));
+    for (width, height, shoot) in [(680, 500, false), (860, 600, false), (1400, 900, true)] {
         resize(h, scale(dpi, width), scale(dpi, height));
         for (page, title) in PAGES.iter().enumerate() {
             menu(h, ID_PAGE + page as u16);
@@ -594,6 +596,7 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
             }
         }
     }
+    SMOKE_MIN_SIZE.with(|m| m.set(None));
     log.push(format!("ok  画面を{shots}枚保存"));
 
     // A DPI change (moving to a 150% monitor) rebuilds fonts and layout.

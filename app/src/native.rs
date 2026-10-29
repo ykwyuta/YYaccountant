@@ -29,6 +29,8 @@ thread_local! {static APP:RefCell<Option<State>>=const{RefCell::new(None)};}
 thread_local! {static SMOKE:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
 thread_local! {static SMOKE_MESSAGES:RefCell<Vec<String>>=const{RefCell::new(Vec::new())};}
 thread_local! {static SMOKE_FILE:RefCell<Option<PathBuf>>=const{RefCell::new(None)};}
+// Lets the smoke test go below the minimum size, as a small screen at a high scale does.
+thread_local! {static SMOKE_MIN_SIZE:std::cell::Cell<Option<(i32,i32)>>=const{std::cell::Cell::new(None)};}
 
 const PAGES: [&str; 4] = ["かんたん入力", "仕訳帳", "仕訳入力", "帳票"];
 const KINDS: [QuickKind; 3] = [QuickKind::Expense, QuickKind::Income, QuickKind::Transfer];
@@ -1061,16 +1063,40 @@ impl State {
     fn label_width(&self, id: u16) -> i32 {
         self.px(10 + 14 * text(self.c(id + LABEL)).chars().count() as i32)
     }
-    /// Width left for a flexible field at `x` once its label and the fields after it fit.
-    fn rest(&self, id: u16, x: i32, right: i32, after: i32) -> i32 {
-        right - x - self.label_width(id) - self.px(14) - after
-    }
-    fn inline(&self, id: u16, x: i32, y: i32, width: i32) -> i32 {
-        let lw = self.label_width(id);
+    /// Lays out fields (with their labels) on one line between `x` and `right`. Each field
+    /// gets its preferred width (96-DPI pixels); a flexible one takes the spare width, and
+    /// on a window narrower than the minimum (a small screen at a high scale) all shrink
+    /// together instead of running off the edge.
+    fn row(&self, x: i32, y: i32, right: i32, items: &[(u16, i32, bool)]) {
+        let gap = self.px(14);
+        let labelled = |id: u16| self.controls.contains_key(&(id + LABEL));
+        let labels: i32 = items
+            .iter()
+            .filter(|i| labelled(i.0))
+            .map(|i| self.label_width(i.0))
+            .sum();
+        let wanted: i32 = items.iter().map(|i| self.px(i.1)).sum::<i32>().max(1);
+        let room = (right - x - labels - gap * (items.len() as i32 - 1)).max(items.len() as i32);
+        let flexible = items.iter().filter(|i| i.2).count() as i32;
         let h = self.px(26);
-        self.place(id + LABEL, x, y, lw, h);
-        self.place(id, x + lw, y, width, h);
-        x + lw + width + self.px(14)
+        let mut cx = x;
+        for (id, preferred, flex) in items {
+            let preferred = self.px(*preferred);
+            let width = if room < wanted {
+                preferred * room / wanted
+            } else if *flex {
+                preferred + (room - wanted) / flexible
+            } else {
+                preferred
+            };
+            if labelled(*id) {
+                let lw = self.label_width(*id);
+                self.place(id + LABEL, cx, y, lw, h);
+                cx += lw;
+            }
+            self.place(*id, cx, y, width, h);
+            cx += width + gap;
+        }
     }
     fn layout(&self) {
         let mut client = RECT::default();
@@ -1141,12 +1167,17 @@ impl State {
                 self.place(ID_Q_GUIDE, rx, gy, rw, bottom - gy);
             }
             1 => {
-                let mut cx = self.inline(ID_J_FROM, x, top, self.px(140));
-                cx = self.inline(ID_J_TO, cx, top, self.px(140));
-                let check = self.px(140);
-                let query = self.rest(ID_J_QUERY, cx, right, check).max(self.px(120));
-                cx = self.inline(ID_J_QUERY, cx, top, query);
-                self.place(ID_J_VOIDED, cx, top, check, h);
+                self.row(
+                    x,
+                    top,
+                    right,
+                    &[
+                        (ID_J_FROM, 140, false),
+                        (ID_J_TO, 140, false),
+                        (ID_J_QUERY, 120, true),
+                        (ID_J_VOIDED, 130, false),
+                    ],
+                );
                 let buttons = bottom - self.px(32);
                 let lines_h = self.px(130);
                 let list_top = top + step;
@@ -1172,19 +1203,29 @@ impl State {
                 self.place(ID_J_COUNT, count, buttons, right - count, self.px(32));
             }
             2 => {
-                let partner = self.px(200);
-                let mut cx = self.inline(ID_E_DATE, x, top, self.px(140));
-                let after = self.label_width(ID_E_PARTNER) + partner;
-                let desc = self.rest(ID_E_DESC, cx, right, after).max(self.px(120));
-                cx = self.inline(ID_E_DESC, cx, top, desc);
-                self.inline(ID_E_PARTNER, cx, top, partner);
+                self.row(
+                    x,
+                    top,
+                    right,
+                    &[
+                        (ID_E_DATE, 140, false),
+                        (ID_E_DESC, 120, true),
+                        (ID_E_PARTNER, 200, false),
+                    ],
+                );
                 let y = top + step;
                 let button = self.px(96);
-                cx = self.inline(ID_E_ACCOUNT, x, y, self.px(220));
-                cx = self.inline(ID_E_DEBIT, cx, y, self.px(110));
-                cx = self.inline(ID_E_CREDIT, cx, y, self.px(110));
-                let memo = self.rest(ID_E_MEMO, cx, right, 0).max(self.px(80));
-                self.inline(ID_E_MEMO, cx, y, memo);
+                self.row(
+                    x,
+                    y,
+                    right,
+                    &[
+                        (ID_E_ACCOUNT, 220, false),
+                        (ID_E_DEBIT, 110, false),
+                        (ID_E_CREDIT, 110, false),
+                        (ID_E_MEMO, 80, true),
+                    ],
+                );
                 // The line buttons sit at the right of the mode line, under the line fields.
                 let y = y + step;
                 let buttons_x = right - 2 * button - self.px(6);
@@ -1220,13 +1261,18 @@ impl State {
                 self.place(ID_E_SAVE, right - save, buttons, save, self.px(32));
             }
             _ => {
-                let mut cx = self.inline(ID_R_KIND, x, top, self.px(150));
-                cx = self.inline(ID_R_FROM, cx, top, self.px(150));
-                cx = self.inline(ID_R_TO, cx, top, self.px(140));
-                let account = self
-                    .rest(ID_R_ACCOUNT, cx, right, 0)
-                    .clamp(self.px(120), self.px(280));
-                self.inline(ID_R_ACCOUNT, cx, top, account);
+                // The account takes what is left only up to its preferred width.
+                self.row(
+                    x,
+                    top,
+                    right.min(x + self.px(860)),
+                    &[
+                        (ID_R_KIND, 150, false),
+                        (ID_R_FROM, 150, false),
+                        (ID_R_TO, 140, false),
+                        (ID_R_ACCOUNT, 160, true),
+                    ],
+                );
                 let summary = bottom - self.px(28);
                 self.place(
                     ID_R_LIST,
@@ -1551,9 +1597,10 @@ extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
             WM_GETMINMAXINFO => {
                 let dpi = GetDpiForWindow(h).max(96) as i32;
                 let info = &mut *(l.0 as *mut MINMAXINFO);
+                let (x, y) = SMOKE_MIN_SIZE.with(|m| m.get()).unwrap_or((860, 600));
                 info.ptMinTrackSize = POINT {
-                    x: scale(dpi, 860),
-                    y: scale(dpi, 600),
+                    x: scale(dpi, x),
+                    y: scale(dpi, y),
                 };
                 return LRESULT(0);
             }
