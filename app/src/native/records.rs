@@ -34,10 +34,11 @@ pub(super) enum Section {
     Audit,
     Tax,
     LifePlan,
+    Study,
 }
 use Section::*;
 /// Pages after the four bookkeeping pages, and the views each one switches between.
-pub(super) const GROUPS: [(&str, &[Section]); 9] = [
+pub(super) const GROUPS: [(&str, &[Section]); 10] = [
     ("勘定科目・取引先", &[Accounts, Partners]),
     ("債権・債務", &[Claims]),
     ("予算", &[Budget]),
@@ -50,6 +51,7 @@ pub(super) const GROUPS: [(&str, &[Section]); 9] = [
     ("税金", &[Tax]),
     ("ライフプラン", &[LifePlan]),
     ("変更履歴", &[Audit]),
+    ("問題集", &[Study]),
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Act {
@@ -91,6 +93,7 @@ impl Section {
             Audit => "変更履歴",
             Tax => "税金",
             LifePlan => "ライフプラン",
+            Study => "問題集",
         }
     }
     /// Pages whose view selector chooses a record (a budget, a tax year or a plan).
@@ -99,6 +102,7 @@ impl Section {
             Budget => Some("予算"),
             Tax => Some("年分"),
             LifePlan => Some("プラン"),
+            Study => Some("シナリオ"),
             _ => None,
         }
     }
@@ -125,6 +129,7 @@ impl Section {
                 .iter()
                 .map(|p| (p.id, p.name.clone()))
                 .collect(),
+            Study => super::study_page::choices(),
             _ => vec![],
         }
     }
@@ -204,6 +209,16 @@ impl Section {
                 second: Some("項目を編集..."),
                 detail: true,
                 ..crud("新しいプラン...", "設定...", "プランを削除")
+            },
+            // Answering records an attempt instead of a change (`native::study_action`).
+            Study => Spec {
+                flag: Some("復習だけ表示"),
+                new: Some("答える..."),
+                edit: Some("ヒント"),
+                first: Some("シナリオを読む"),
+                second: Some("練習用の帳簿を作る"),
+                detail: true,
+                ..Default::default()
             },
         }
     }
@@ -873,6 +888,7 @@ pub(super) fn view(book: &Book, s: Section, cx: &Context, audit: &[Value]) -> Re
         }
         Tax => return planning::tax_view(book, cx),
         LifePlan => return planning::plan_view(book, cx),
+        Study => return Err("問題集の表示は study_page::view で作ります".into()),
         Audit => {
             main = Table::new(&[
                 ("日時", 170, L),
@@ -1057,6 +1073,7 @@ pub(super) fn prepare(book: &Book, s: Section, act: Act, cx: &Context) -> Result
     match s {
         Tax => return planning::tax_prepare(book, act, cx),
         LifePlan => return planning::plan_prepare(book, act, cx),
+        Study => return Err("問題集の操作は study_action で行います".into()),
         _ => {}
     }
     if act == Act::Remove {
@@ -1689,6 +1706,7 @@ pub(super) fn finish(
     match s {
         Tax => return planning::tax_finish(book, act, cx, v),
         LifePlan => return planning::plan_finish(book, act, cx, v),
+        Study => return Err("問題集の操作は study_action で行います".into()),
         _ => {}
     }
     let edit = act == Act::Edit;
@@ -1953,9 +1971,10 @@ mod tests {
         };
         let mut cx = context(today);
         let id_of = |b: &Book, name: &str| b.accounts.iter().find(|a| a.name == name).unwrap().id;
-        // Every form the buttons open has as many fields as `finish` reads.
+        // Every form the buttons open has as many fields as `finish` reads. The problem
+        // set answers through its own form (`study_page::form`, tested there).
         for s in GROUPS.iter().flat_map(|g| g.1.iter()) {
-            if s.spec().new.is_some() && *s != Budget {
+            if s.spec().new.is_some() && *s != Budget && *s != Study {
                 let Ok(Prepared::Form(_, fields)) = prepare(&book, *s, Act::New, &cx) else {
                     panic!("{s:?}");
                 };
