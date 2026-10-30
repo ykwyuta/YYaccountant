@@ -8,11 +8,13 @@ const password = process.env.YYA_PASSWORD;
 const out = process.env.YYA_OUT || ".";
 const views = ["home", "guide", "input", "journal", "accounts", "claims", "budget", "plans", "cost", "stats", "tax", "lifeplan", "reports", "audit"];
 
+let current = null;
+const errors = [];
 (async () => {
   const browser = await chromium.launch();
-  const errors = [];
   for (const scheme of ["light", "dark"]) {
     const page = await browser.newPage({ viewport: { width: 1360, height: 900 }, colorScheme: scheme });
+    current = page;
     page.on("console", (m) => m.type() === "error" && errors.push(`${scheme}: ${m.text()}`));
     page.on("pageerror", (e) => errors.push(`${scheme}: ${e.message}`));
     await page.goto(url);
@@ -198,7 +200,18 @@ const views = ["home", "guide", "input", "journal", "accounts", "claims", "budge
   const real = errors.filter((e) => !/status of 40[0-9]/.test(e));
   if (real.length) throw new Error("Console errors:\n" + real.join("\n"));
   console.log("Browser validation passed");
-})().catch((e) => {
+})().catch(async (e) => {
   console.error(e);
+  if (errors.length) console.error("console errors:\n" + errors.join("\n"));
+  // Keep what the page showed so a failure on a CI runner can be diagnosed from the artifact.
+  if (current && !current.isClosed()) {
+    try {
+      console.error("message:", await current.textContent("#message", { timeout: 2000 }));
+      console.error("tiles:", await current.textContent(".tiles", { timeout: 2000 }));
+      await current.screenshot({ path: path.join(out, "failure.png"), fullPage: true });
+    } catch (x) {
+      console.error("could not record the failure:", x.message);
+    }
+  }
   process.exit(1);
 });
