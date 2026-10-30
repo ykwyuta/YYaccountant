@@ -13,6 +13,7 @@ pub mod num;
 pub mod plans;
 pub mod reports;
 mod store;
+pub mod study;
 pub mod tax;
 pub mod tutorial;
 

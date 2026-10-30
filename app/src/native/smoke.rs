@@ -595,6 +595,7 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
 
     records(h, log)?;
     planning(h, directory, log)?;
+    study_page(h, log)?;
 
     // Layout at the minimum and a large size, on every page; screenshots at the large size.
     let mut shots = 0;
@@ -673,6 +674,24 @@ fn steps(h: HWND, directory: &Path, log: &mut Vec<String>) -> Result<()> {
     check(
         unsafe { !IsWindowEnabled(handle(ID_G_NEW)?).as_bool() },
         "読み取り専用では記録の追加も無効",
+        log,
+    )?;
+    // The problem set can still be practised; nothing is recorded.
+    menu(h, study_page_id());
+    let before = attempts()?.len();
+    choose(h, ID_G_VIEW, "佐藤健さん")?;
+    select(ID_G_LIST, 0)?;
+    fill(&[("答え", "工具器具備品")]);
+    click(h, ID_G_NEW)?;
+    let shown = messages();
+    check(
+        unsafe {
+            IsWindowEnabled(handle(ID_G_NEW)?).as_bool()
+                && !IsWindowEnabled(handle(ID_G_SECOND)?).as_bool()
+        } && attempts()?.len() == before
+            && shown.len() == 1
+            && shown[0].starts_with("sato-01 パソコンの購入（正解）"),
+        "読み取り専用でも問題集は採点だけできる（記録しない・練習用の帳簿は作れない）",
         log,
     )?;
     SMOKE_FILE.with(|f| *f.borrow_mut() = Some(path.clone()));
@@ -943,6 +962,118 @@ fn records(h: HWND, log: &mut Vec<String>) -> Result<()> {
     check(
         left.is_empty(),
         &format!("記録の画面で想定外のメッセージなし {left:?}"),
+        log,
+    )?;
+    Ok(())
+}
+
+fn study_page_id() -> u16 {
+    ID_PAGE + (PAGES.len() - 1) as u16
+}
+fn attempts() -> Result<Vec<yy_accountant::study::Attempt>> {
+    Ok(state(|s| s.store.attempts(&s.actor))??)
+}
+/// Problem-set page: each answer format graded and recorded, the review filter, switching
+/// scenarios, the hint and story texts, and the practice book.
+fn study_page(h: HWND, log: &mut Vec<String>) -> Result<()> {
+    menu(h, study_page_id());
+    check(
+        rows(ID_G_LIST)? == 16 && summary()?.contains("このシナリオ 0 / 16"),
+        "問題集：最初のシナリオの16問と進み具合",
+        log,
+    )?;
+    let row = find_row(ID_G_LIST, 0, "aoki-02")?;
+    select(ID_G_LIST, row)?;
+    check(
+        find_row(ID_G_DETAIL, 0, "初任給").is_ok(),
+        "問題を選ぶと問題文を表示",
+        log,
+    )?;
+    // A journal with the sides reversed, then the correct one (full-width digits too).
+    fill(&[
+        ("1行目の科目", "401 給与収入"),
+        ("1行目の借方", "192000"),
+        ("2行目の科目", "111 普通預金"),
+        ("2行目の貸方", "192000"),
+    ]);
+    click(h, ID_G_NEW)?;
+    let first = attempts()?;
+    check(
+        first.len() == 1
+            && first[0].problem == "aoki-02"
+            && !first[0].correct
+            && cell(handle(ID_G_LIST)?, row, 4) == "不正解",
+        "仕訳の借方と貸方を逆にすると不正解として記録",
+        log,
+    )?;
+    fill(&[
+        ("1行目の科目", "111 普通預金"),
+        ("1行目の借方", "192,000"),
+        ("2行目の科目", "401 給与収入"),
+        ("2行目の貸方", "１９２０００"),
+    ]);
+    click(h, ID_G_NEW)?;
+    select(ID_G_LIST, find_row(ID_G_LIST, 0, "aoki-06")?)?;
+    fill(&[("答え（円）", "435,600")]);
+    click(h, ID_G_NEW)?;
+    let row = find_row(ID_G_LIST, 0, "aoki-01")?;
+    select(ID_G_LIST, row)?;
+    fill(&[("答え", "日用品")]);
+    click(h, ID_G_NEW)?;
+    let all = attempts()?;
+    check(
+        all.iter().map(|a| a.correct).collect::<Vec<_>>() == [false, true, true, false]
+            && cell(handle(ID_G_LIST)?, find_row(ID_G_LIST, 0, "aoki-02")?, 4) == "正解"
+            && summary()?.contains("このシナリオ 2 / 16")
+            && summary()?.contains("復習 1問"),
+        "仕訳・数値（円）・選択の採点と記録、進み具合",
+        log,
+    )?;
+    select(ID_G_LIST, row)?;
+    click(h, ID_G_EDIT)?;
+    let review = handle(ID_G_FLAG)?;
+    send(review, BM_SETCHECK, BST_CHECKED.0 as usize, 0);
+    click(h, ID_G_FLAG)?;
+    check(
+        rows(ID_G_LIST)? == 1 && cell(handle(ID_G_LIST)?, 0, 0) == "aoki-01",
+        "復習だけ表示で間違えたままの問題",
+        log,
+    )?;
+    send(review, BM_SETCHECK, BST_UNCHECKED.0 as usize, 0);
+    click(h, ID_G_FLAG)?;
+    choose(h, ID_G_VIEW, "佐藤健さん")?;
+    click(h, ID_G_FIRST)?;
+    check(
+        rows(ID_G_LIST)? == 14 && summary()?.contains("全体 2 / 55"),
+        "シナリオを切り替える（14問）",
+        log,
+    )?;
+    let shown = messages();
+    check(
+        shown.len() == 6
+            && shown[0].starts_with("aoki-02 初任給の仕訳（不正解）")
+            && shown[1].starts_with("aoki-02 初任給の仕訳（正解）")
+            && shown[2].starts_with("aoki-06 6月末の預金残高（正解）")
+            && shown[3].starts_with("aoki-01 家電を買った（不正解）")
+            && shown[4].starts_with("ヒント：")
+            && shown[5].starts_with("佐藤健さんの副業開業"),
+        &format!("採点結果・ヒント・シナリオの文章を表示 {shown:?}"),
+        log,
+    )?;
+    click(h, ID_G_SECOND)?;
+    let practice = book()?;
+    check(
+        practice.name == "学習：佐藤健さんの副業開業"
+            && practice.tax_returns.len() == 1
+            && practice.entries.len() > 30
+            && rows(ID_G_LIST)? == 14,
+        "練習用の帳簿を作って開く（問題集の画面はそのまま）",
+        log,
+    )?;
+    let left = messages();
+    check(
+        left.is_empty(),
+        &format!("問題集で想定外のメッセージなし {left:?}"),
         log,
     )?;
     Ok(())

@@ -129,6 +129,14 @@ def main():
             assert session["read_only"]
             assert viewer.api("book_change", {"book_id": 1, "expected_revision": 1, "change": quick})[0] == 403
             assert viewer.api("statistics", {"book_id": 1, "from": "2026-01-01", "to": "2026-12-31"})[0] == 200
+            # Study: the session user is the learner; read-only users practise without saving.
+            status, graded, _ = viewer.api("study_answer", {"problem_id": "aoki-01", "answer": {"choice": 2}, "actor": "x"})
+            assert status == 200 and graded["correct"] and graded["attempt"] is None, graded
+            assert viewer.api("study_practice_book", {"scenario_id": "aoki"})[0] == 403
+            status, graded, _ = c.api("study_answer", {"problem_id": "komugi-05", "answer": {"number": "296"}, "actor": "spoofed"})
+            assert status == 200 and graded["correct"] and graded["attempt"]
+            _, listing, _ = c.api("study_list", {"actor": "spoofed"})
+            assert listing["progress"]["problems"]["komugi-05"]["solved"], listing["progress"]
             assert c.request("POST", "/web/logout", {})[0] == 200
             assert c.api("book_list", {})[0] == 401
             if browser:

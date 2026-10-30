@@ -706,3 +706,85 @@ td.strong {
 p.error {
   color: var(--bad);
 }
+.problem-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.problem-head h3 {
+  margin: 0 8px 0 0;
+  font-size: 15px;
+}
+.problem > p {
+  line-height: 1.7;
+}
+.choices {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+.choices label {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+  cursor: pointer;
+  line-height: 1.5;
+}
+.choices label:has(input:checked) {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.choices input {
+  margin-top: 3px;
+}
+.problem .hint {
+  background: var(--brand-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
+  line-height: 1.6;
+}
+.study-result:empty {
+  display: none;
+}
+.study-result {
+  border-top: 1px solid var(--line);
+  margin-top: 10px;
+  padding-top: 10px;
+  line-height: 1.7;
+}
+.verdict {
+  font-weight: 700;
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+.verdict.ok {
+  color: var(--good);
+}
+.verdict.ng {
+  color: var(--bad);
+}
+.feedback {
+  margin: 0 0 8px;
+  padding-left: 20px;
+  color: var(--bad);
+}
+.scenario-card p {
+  line-height: 1.7;
+}
+.scenario-meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 8px 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.problem input.amount {
+  width: 200px;
+}

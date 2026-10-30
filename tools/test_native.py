@@ -12,6 +12,7 @@ target/native-validation/.
 from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -37,7 +38,8 @@ def main():
             "SELECT DISTINCT typeof(debit) FROM entry_lines UNION SELECT DISTINCT typeof(credit) FROM entry_lines")}
         assert kinds == {"text"}, kinds
         books = dict(db.execute("SELECT name, kind FROM books"))
-        assert books == {"UI検証 家計（改名）": "household", "UI検証 事業": "sole_proprietor"}, books
+        assert books == {"UI検証 家計（改名）": "household", "UI検証 事業": "sole_proprietor",
+                         "学習：佐藤健さんの副業開業": "sole_proprietor"}, books
         for book, entry, debit, credit in db.execute(
                 "SELECT e.book_id, e.id, group_concat(l.debit, ' '), group_concat(l.credit, ' ') "
                 "FROM entries e JOIN entry_lines l ON l.book_id = e.book_id AND l.parent_id = e.id "
@@ -58,10 +60,24 @@ def main():
                               ("life_plans", "savings"), ("life_plan_flows", "amount")]:
             kinds = {kind for (kind,) in db.execute(f"SELECT DISTINCT typeof({column}) FROM {table}")}
             assert kinds == {"text"}, (table, kinds)
-        assert db.execute("SELECT salary, count(*) FROM tax_returns").fetchone() == ("6000000", 1)
+        typed = "SELECT id FROM books WHERE name NOT LIKE '学習：%'"
+        assert db.execute(f"SELECT salary, count(*) FROM tax_returns WHERE book_id IN ({typed})").fetchone() == (
+            "6000000", 1)
         assert db.execute("SELECT count(*) FROM life_plans").fetchone() == (2,)
         for operation in ["save_tax_return", "save_life_plan"]:
             assert operation in changes, operation
+        # The practice book replays the scenario through ordinary audited changes.
+        practice = "SELECT id FROM books WHERE name = '学習：佐藤健さんの副業開業'"
+        assert db.execute(f"SELECT salary, side_kind FROM tax_returns WHERE book_id IN ({practice})").fetchall() == [
+            ("5200000", "blue_business")]
+        assert db.execute(f"SELECT count(*) > 30 FROM audit WHERE book_id IN ({practice})").fetchone() == (1,)
+        # Problem-set answers: four graded attempts; the read-only one was not recorded.
+        attempts = db.execute("SELECT actor, problem, correct, answer FROM study_attempts ORDER BY id").fetchall()
+        assert [(a, p, c) for a, p, c, _ in attempts] == [
+            ("UI-test", "aoki-02", 0), ("UI-test", "aoki-02", 1), ("UI-test", "aoki-06", 1),
+            ("UI-test", "aoki-01", 0)], attempts
+        assert json.loads(attempts[2][3]) == {"number": "435,600"}, attempts[2]
+        assert db.execute("PRAGMA user_version").fetchone() == (3,)
 
     try:
         from PIL import Image

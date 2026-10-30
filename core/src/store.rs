@@ -18,9 +18,12 @@ use std::path::Path;
 use std::time::Duration;
 
 const APPLICATION_ID: i64 = 0x5959_4143; // "YYAC"
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 /// Tables added in version 2; a version 1 file gets them when opened for writing.
 const SINCE_V2: &[&str] = &["tax_returns", "life_plans"];
+/// Version 3: answers to the study problems (not part of any book).
+const STUDY: &str = "CREATE TABLE IF NOT EXISTS study_attempts(id INTEGER PRIMARY KEY,problem TEXT NOT NULL,actor TEXT NOT NULL,at TEXT NOT NULL,correct INTEGER NOT NULL,answer TEXT NOT NULL CHECK(json_valid(answer)));\
+     CREATE INDEX IF NOT EXISTS study_attempts_actor ON study_attempts(actor,problem,id);";
 
 struct Child {
     field: &'static str,
@@ -309,6 +312,7 @@ fn schema() -> String {
     );
     sql += &tables(|_| true);
     sql += "CREATE INDEX entries_date ON entries(book_id,date);CREATE INDEX entry_lines_account ON entry_lines(book_id,account);";
+    sql += STUDY;
     sql
 }
 fn tables(include: impl Fn(&Spec) -> bool) -> String {
@@ -610,6 +614,36 @@ pub struct NewBook {
     #[serde(default = "january")]
     pub fiscal_start_month: u32,
 }
+impl Book {
+    /// A new book with the template chart, as [`Store::create`] stores it.
+    pub fn blank(id: i64, request: &NewBook) -> Book {
+        let accounts = chart::accounts(request.kind);
+        Book {
+            id,
+            name: request.name.trim().to_string(),
+            kind: request.kind,
+            currency: request.currency.clone(),
+            minor_digits: request.minor_digits,
+            rounding: request.rounding,
+            fiscal_start_month: request.fiscal_start_month,
+            revision: 1,
+            next_ids: BTreeMap::from([("account".into(), accounts.len() as i64 + 1)]),
+            accounts,
+            partners: vec![],
+            entries: vec![],
+            claims: vec![],
+            budgets: vec![],
+            plans: vec![],
+            materials: vec![],
+            material_moves: vec![],
+            equipment: vec![],
+            products: vec![],
+            productions: vec![],
+            tax_returns: vec![],
+            life_plans: vec![],
+        }
+    }
+}
 fn jpy() -> String {
     "JPY".into()
 }
@@ -628,6 +662,8 @@ pub struct Store {
     read_only: bool,
     /// A version 1 file opened read-only (no tax or life plan tables).
     v1: bool,
+    /// False for a read-only file older than version 3 (no study table yet).
+    study: bool,
 }
 fn actor_ok(actor: &str) -> Result<()> {
     if actor.trim().is_empty() || actor.len() > 256 || actor.chars().any(char::is_control) {
@@ -662,15 +698,20 @@ impl Store {
                 "BEGIN IMMEDIATE;{}PRAGMA application_id={APPLICATION_ID};PRAGMA user_version={VERSION};COMMIT;",
                 schema()
             ))?;
-        } else if application == APPLICATION_ID && version == 1 && !read_only {
-            c.execute_batch(&format!(
-                "BEGIN IMMEDIATE;{}PRAGMA user_version={VERSION};COMMIT;",
+        } else if application == APPLICATION_ID && (1..VERSION).contains(&version) && !read_only {
+            let v2 = if version == 1 {
                 tables(|s| SINCE_V2.contains(&s.table))
+            } else {
+                String::new()
+            };
+            c.execute_batch(&format!(
+                "BEGIN IMMEDIATE;{v2}{STUDY}PRAGMA user_version={VERSION};COMMIT;"
             ))?;
-        } else if application != APPLICATION_ID || !(version == VERSION || version == 1) {
+        } else if application != APPLICATION_ID || !(1..=VERSION).contains(&version) {
             return Err(invalid("対応していないデータベース形式です"));
         }
         let v1 = version == 1 && read_only;
+        let study = version >= 3 || !read_only;
         if !read_only {
             c.pragma_update(None, "journal_mode", "WAL")?;
         }
@@ -678,6 +719,7 @@ impl Store {
             connection: c,
             read_only,
             v1,
+            study,
         })
     }
     pub fn read_only(&self) -> bool {
@@ -728,31 +770,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id: i64 = tx.query_row("SELECT coalesce(max(id),0)+1 FROM books", [], |r| r.get(0))?;
-        let accounts = chart::accounts(request.kind);
-        let book = Book {
-            id,
-            name: request.name.trim().to_string(),
-            kind: request.kind,
-            currency: request.currency.clone(),
-            minor_digits: request.minor_digits,
-            rounding: request.rounding,
-            fiscal_start_month: request.fiscal_start_month,
-            revision: 1,
-            next_ids: BTreeMap::from([("account".into(), accounts.len() as i64 + 1)]),
-            accounts,
-            partners: vec![],
-            entries: vec![],
-            claims: vec![],
-            budgets: vec![],
-            plans: vec![],
-            materials: vec![],
-            material_moves: vec![],
-            equipment: vec![],
-            products: vec![],
-            productions: vec![],
-            tax_returns: vec![],
-            life_plans: vec![],
-        };
+        let book = Book::blank(id, request);
         book.validate()?;
         write(&tx, None, &book)?;
         tx.execute(
@@ -825,6 +843,67 @@ impl Store {
         for row in rows {
             let (aid, at, actor, revision, change) = row?;
             out.push(json!({"id":aid,"at":at,"actor":actor,"revision":revision,"change":serde_json::from_str::<Value>(&change)?}));
+        }
+        Ok(out)
+    }
+    /// Records an answer to a study problem. Returns the attempt ID.
+    pub fn record_attempt(
+        &mut self,
+        actor: &str,
+        problem: &str,
+        answer: &Value,
+        correct: bool,
+    ) -> Result<i64> {
+        if self.read_only {
+            return Err(invalid("読み取り専用で開いています"));
+        }
+        actor_ok(actor)?;
+        if problem.is_empty() || problem.len() > 64 {
+            return Err(invalid("問題IDが不正です"));
+        }
+        let text = answer.to_string();
+        if text.len() > 64 * 1024 {
+            return Err(invalid("解答が大きすぎます"));
+        }
+        self.connection.execute(
+            "INSERT INTO study_attempts(problem,actor,at,correct,answer) VALUES(?,?,?,?,?)",
+            params![
+                problem,
+                actor,
+                chrono::Utc::now().to_rfc3339(),
+                correct,
+                text
+            ],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+    /// Every attempt of one learner, oldest first.
+    pub fn attempts(&self, actor: &str) -> Result<Vec<crate::study::Attempt>> {
+        if !self.study {
+            return Ok(vec![]);
+        }
+        let mut q = self.connection.prepare(
+            "SELECT id,problem,at,correct,answer FROM study_attempts WHERE actor=? ORDER BY id",
+        )?;
+        let rows = q.query_map([actor], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = vec![];
+        for row in rows {
+            let (id, problem, at, correct, answer) = row?;
+            out.push(crate::study::Attempt {
+                id,
+                problem,
+                at,
+                correct,
+                answer: serde_json::from_str(&answer)?,
+            });
         }
         Ok(out)
     }

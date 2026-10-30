@@ -16,7 +16,7 @@ use windows::{
 };
 use yy_accountant::{
     Book, BookInfo, BookKind, Change, Entry, Error as CoreError, Line, NewBook, QuickEntry,
-    QuickKind, Store, lifeplan, num::Rounding, reports, tutorial,
+    QuickKind, Store, lifeplan, num::Rounding, reports, study, tutorial,
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod form;
@@ -24,6 +24,7 @@ mod planning;
 mod records;
 mod sheets;
 mod smoke;
+mod study_page;
 use form::Field;
 use records::{Act, Prepared, Section};
 use sheets::Table;
@@ -35,7 +36,7 @@ thread_local! {static SMOKE_FILE:RefCell<Option<PathBuf>>=const{RefCell::new(Non
 // Lets the smoke test go below the minimum size, as a small screen at a high scale does.
 thread_local! {static SMOKE_MIN_SIZE:std::cell::Cell<Option<(i32,i32)>>=const{std::cell::Cell::new(None)};}
 
-const PAGES: [&str; 13] = [
+const PAGES: [&str; 14] = [
     "かんたん入力",
     "仕訳帳",
     "仕訳入力",
@@ -49,6 +50,7 @@ const PAGES: [&str; 13] = [
     "税金",
     "ライフプラン",
     "変更履歴",
+    "問題集",
 ];
 /// Pages from here on are record pages (`records::GROUPS`) sharing one set of controls.
 const RECORDS: usize = 4;
@@ -1387,7 +1389,10 @@ impl State {
         let section = self.section();
         let view = self.c(ID_G_VIEW);
         let chooser = section.chooser();
-        let items: Vec<(i64, String)> = if chooser.is_some() {
+        let study = section == Section::Study;
+        let items: Vec<(i64, String)> = if study {
+            study_page::choices()
+        } else if chooser.is_some() {
             self.book
                 .as_ref()
                 .map(|b| section.choices(b))
@@ -1419,8 +1424,14 @@ impl State {
             (ID_G_SECOND, spec.second),
         ] {
             set_text(self.c(id), label.unwrap_or(""));
+            // The problem set needs no book; read-only files can still be practised on.
+            let enabled = if study {
+                id != ID_G_SECOND || !self.read_only
+            } else {
+                !self.read_only && self.book.is_some()
+            };
             unsafe {
-                let _ = EnableWindow(self.c(id), !self.read_only && self.book.is_some());
+                let _ = EnableWindow(self.c(id), enabled);
             }
         }
         if reset {
@@ -1450,8 +1461,13 @@ impl State {
         }
     }
     fn record_view(&self) -> Result<records::View> {
-        let book = self.book()?;
         let section = self.section();
+        if section == Section::Study {
+            let cx = self.record_context();
+            let attempts = self.store.attempts(&self.actor)?;
+            return Ok(study_page::view(cx.chosen, cx.flag, cx.main, &attempts));
+        }
+        let book = self.book()?;
         let mut audit: Vec<serde_json::Value> = vec![];
         if section == Section::Audit {
             loop {
@@ -1558,6 +1574,35 @@ impl State {
     ) -> Result<()> {
         let change = records::finish(self.book()?, section, act, cx, values)?;
         self.record_apply(section, change)
+    }
+    /// Records a graded answer (nothing is saved for a read-only file) and refreshes the list.
+    fn study_record(&mut self, problem: &str, answer: &study::Answer, correct: bool) -> Result<()> {
+        if !self.read_only {
+            let answer = serde_json::to_value(answer)?;
+            self.store
+                .record_attempt(&self.actor, problem, &answer, correct)?;
+        }
+        self.refresh_records();
+        Ok(())
+    }
+    /// Creates a book holding a scenario's records through the normal validated changes.
+    fn study_practice(&mut self, id: &str) -> Result<()> {
+        let (request, changes) = study::practice(id)?;
+        let mut book = self.store.create(&request, &self.actor)?;
+        for c in changes {
+            book = self
+                .store
+                .apply(book.id, book.revision, c, &self.actor)?
+                .book;
+        }
+        self.version = self.store.data_version()?;
+        self.books = self.store.list()?;
+        self.book = None;
+        self.reload_books()?;
+        self.load_book(book.id)?;
+        self.note = format!("練習用の帳簿「{}」を作りました", book.name);
+        self.update_status();
+        Ok(())
     }
     fn record_apply(&mut self, section: Section, change: Change) -> Result<()> {
         let created = match &change {
@@ -1685,6 +1730,9 @@ fn confirm(h: HWND, question: &str) -> bool {
 }
 /// A button of a record page: a form or a confirmation first, then the change.
 fn record_action(h: HWND, act: Act) {
+    if with(|s| s.page >= RECORDS && s.section() == Section::Study) == Some(true) {
+        return study_action(h, act);
+    }
     let (section, mut cx, mut prepared) = match with(|s| s.record_prepare(act)) {
         Some(Ok(p)) => p,
         Some(Err(e)) => return message(h, &e.to_string(), true),
@@ -1722,6 +1770,55 @@ fn record_action(h: HWND, act: Act) {
         Prepared::Choose(..) => None,
     };
     report(h, outcome);
+}
+/// Buttons of the problem-set page. Answers are graded by the core and recorded as
+/// attempts, not book changes; the practice book is created like a new book.
+fn study_action(h: HWND, act: Act) {
+    let Some((chosen, row)) = with(|s| {
+        let cx = s.record_context();
+        (cx.chosen, cx.main)
+    }) else {
+        return;
+    };
+    let scenario = study_page::scenario(chosen);
+    match act {
+        Act::First => form::show_text(h, scenario.title, &study_page::scenario_text(scenario)),
+        Act::Second => {
+            if confirm(
+                h,
+                &format!("「{}」の練習用の帳簿を作りますか？", scenario.title),
+            ) {
+                report(h, with(|s| s.study_practice(scenario.id)));
+            }
+        }
+        Act::New | Act::Edit => {
+            let Some(p) = study_page::problem(chosen, row) else {
+                return message(h, "一覧で問題を選んでください", true);
+            };
+            if act == Act::Edit {
+                return message(h, &format!("ヒント：{}", p.hint), false);
+            }
+            let (title, fields) = study_page::form(scenario, p);
+            let Some(values) = form::show(h, &title, fields) else {
+                return;
+            };
+            let graded = study_page::answer(scenario, p, &values)
+                .and_then(|a| -> Result<_> { Ok((study::grade(&p.id, &a)?, a)) });
+            match graded {
+                Ok((g, a)) => {
+                    report(h, with(|s| s.study_record(&p.id, &a, g.correct)));
+                    let verdict = if g.correct { "正解" } else { "不正解" };
+                    form::show_text(
+                        h,
+                        &format!("{title}（{verdict}）"),
+                        &study_page::result_text(p, &g),
+                    );
+                }
+                Err(e) => message(h, &e.to_string(), true),
+            }
+        }
+        Act::Remove => {}
+    }
 }
 fn report(h: HWND, outcome: Option<Result<()>>) {
     if let Some(Err(e)) = outcome {

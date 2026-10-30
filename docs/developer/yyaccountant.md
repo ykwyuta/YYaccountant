@@ -29,6 +29,7 @@ core/src
   tax.rs       年分ごとの金額基準（Rules）と所得税・住民税の計算
   lifeplan.rs  キャッシュフロー表、比較、6つの係数、ローン返済額、教育費、帳簿からの雛形、CSV
   tutorial.rs  チュートリアル（Web UI・ネイティブ画面・MCP・docs/user/tutorial.md の共通の内容）
+  study.rs     問題集：4つのシナリオ（帳簿をメモリー上で組み立て）、問題と正解、採点と指摘、進み具合、docs/user/study.md の生成
 app/src
   main.rs      CLI
   mcp.rs       MCPツール（Web UIも同じ `call` を使用）
@@ -42,6 +43,7 @@ app/src
   native/records.rs 記録の画面（科目・取引先・債権債務・予算・計画・原価・統計・履歴）の表、フォーム、Change
   native/planning.rs 税金とライフプランの画面の表、2段階のフォーム、Change
   native/form.rs    帳簿と各記録の入力に使うモーダルフォーム（文字・選択肢・IDの選択）と、チュートリアルの読み取り専用の窓
+  native/study_page.rs 問題集の画面の一覧・問題文・進み具合、答えの入力欄と解答への変換、採点結果とシナリオの文章（窓なしで試験）
   native/smoke.rs   --ui-smoke-test の自己検証
 app/build.rs   Windowsマニフェスト（コモンコントロールv6、PerMonitorV2）とアイコンの埋め込み
 ```
@@ -57,12 +59,13 @@ app/build.rs   Windowsマニフェスト（コモンコントロールv6、PerMo
 
 ## SQLiteスキーマ
 
-`application_id = 0x59594143`（"YYAC"）、`user_version = 2`。他の形式のファイルは開かない。版1のファイルは書き込み可能で開いたときに `tax_returns` と `life_plans`（と子テーブル）を作って版2にする。読み取り専用で開いた版1のファイルは変更せず、税額計算とライフプランを空として読む。
+`application_id = 0x59594143`（"YYAC"）、`user_version = 3`。他の形式のファイルは開かない。版1・版2のファイルは書き込み可能で開いたときに足りないテーブル（版2で `tax_returns` と `life_plans` と子テーブル、版3で `study_attempts`）を作って版3にする。読み取り専用で開いた古いファイルは変更せず、税額計算・ライフプラン・問題集の解答を空として読む。
 
 - `books(id, name, kind, currency, minor_digits, rounding, fiscal_start_month, revision, next_ids, created_at)`
 - 各コレクションは `(book_id, id)` を主キーとするテーブル: `accounts` `partners` `claims` `entries` `budgets` `plans` `materials` `material_moves` `equipment` `products` `productions` `tax_returns` `life_plans`
 - 入れ子のリストは `(book_id, parent_id, seq)` の子テーブル: `entry_lines` `budget_lines` `product_materials` `product_equipment` `production_materials` `production_equipment` `tax_dependents` `life_plan_members` `life_plan_flows` `life_plan_events`
 - `audit(id, book_id, at, actor, revision, change)`
+- `study_attempts(id, problem, actor, at, correct, answer)`：問題集の解答（帳簿に属さない。`actor` ごとの進み具合に使う）
 
 列は `store.rs` の `SPECS` で定義し、serdeのJSON表現と列を相互に変換する。書き込み時は前後のJSONを比較し、変わったレコードだけを削除・挿入する。レコードのキーと列定義が一致しなければ保存を中止する（モデルと定義のずれを検出）。IDは帳簿ごとに `next_ids` で払い出し、削除後も再利用しない。
 
@@ -101,9 +104,18 @@ app/build.rs   Windowsマニフェスト（コモンコントロールv6、PerMo
 - `compare` は2つのプランの年末の金融資産を年ごとに並べ、最終年の差と最少残高を返す。`coefficients` は `powi` による十進数で計算し小数6桁に丸める。`loan_payment` は元利均等（月利＝年利/12）の月額を帳簿の端数処理で丸めて12倍する。
 - 教育費の目安（`EDUCATION`）は年末時点の年齢で段階を決める（幼稚園4〜6歳、小学校7〜12歳、中学校13〜15歳、高校16〜18歳、大学19〜22歳）。
 
+## 問題集の仕様
+
+- シナリオは `study.rs` の関数で、`Book::blank` から `Change` を順に `Book::apply` して帳簿を組み立てる（`Store::create` と同じ科目・IDの払い出し）。数値問題の正解は、その帳簿に対する `reports`・`tax::calculate`・`lifeplan`・`cost`・`claims` の結果から作り、解説の数値も同じ値を埋め込む。正解のずれは `core/tests/study.rs` の手計算値で検出する。
+- 問題の形式は選択（選択肢ごとの解説つき）、仕訳（科目コードと借方・貸方）、数値（小数桁と単位。答えを四捨五入して比べる）。`ProblemView`・`ScenarioView` は正解と解説を含まず、解説は `grade` の結果でだけ返す。
+- 仕訳の採点は科目ごとに借方−貸方を集計して比べ、足りない科目・余分な科目・借方と貸方の逆・金額の違い・左右の合計の不一致を指摘する。数値は差が1%以内なら端数処理を、符号だけ違えば符号を指摘する。
+- 「練習用の帳簿」は `Store::create` の後に同じ `Change` 列を `Store::apply` するので、通常の検証・版・監査を通り、問題の前提と同じ帳簿になる（`core/tests/study.rs` で一致を確かめる）。
+- 進み具合（`progress`）は解答の記録から、問題ごとの回数・一度でも正解・最後の解答の正否、シナリオ・分野ごとの正解数、最後に間違えたままの問題（復習）を求める。
+- MCPの `study_list` `study_answer` `study_practice_book`。Web UIでは `study_list`・`study_answer` の `actor` をログインユーザーに置き換え、読み取り専用ユーザーの解答は採点だけして記録しない。ネイティブ画面は記録の画面の1つ（`Section::Study`）として共有コントロールに表示し、内容とフォームは `native/study_page.rs`（窓に依存しない）で作る。ボタンは `Change` ではなく解答の記録になるので `record_action` から `study_action` に分ける。問題集は帳簿がなくても使え、読み取り専用では採点だけ（練習用の帳簿のボタンは無効）。
+
 ## Web UI
 
-`/` と `/web/*` だけを公開する。Hostの許可リスト、POSTのOrigin一致とContent-Type、ログイン後のHttpOnly・SameSite=Strictクッキーと `X-YY-CSRF` を検査する。CSPは `default-src 'self'`（インラインのスクリプト・スタイル不可）。`/web/api` は `{tool, arguments}` を受け取り `mcp::call` を呼ぶ。変更系（`book_create` `book_change`）は読み取り専用ユーザーを拒否し、`actor` をログインユーザー名で上書きする。ログイン失敗は1分30回で制限する。
+`/` と `/web/*` だけを公開する。Hostの許可リスト、POSTのOrigin一致とContent-Type、ログイン後のHttpOnly・SameSite=Strictクッキーと `X-YY-CSRF` を検査する。CSPは `default-src 'self'`（インラインのスクリプト・スタイル不可）。`/web/api` は `{tool, arguments}` を受け取り `mcp::call` を呼ぶ。変更系（`book_create` `book_change` `study_practice_book`）は読み取り専用ユーザーを拒否し、`actor` をログインユーザー名で上書きする。「はじめに」と「問題集」は帳簿がなくても表示する。ログイン失敗は1分30回で制限する。
 
 ## ネイティブ画面
 
@@ -118,7 +130,7 @@ app/build.rs   Windowsマニフェスト（コモンコントロールv6、PerMo
 - 5ページ目以降（記録の画面）は1組の共有コントロール（表示の切り替え、基準日・期間、一覧、詳細、要約、最大5つのボタン）を使う。何を表示し、どのボタンがどのフォームを開き、どの `Change` を作るかは `native/records.rs` の `Section`・`Spec`・`view`・`prepare`・`finish` で決める。フォームは状態を借りずに開き、閉じた後に同じ版で適用する。削除と償却の計上は確認してから適用する。計画の予定は詳細行のIDに計画IDと日付を、製品の構成は材料を正、設備を負のIDで持つ。
 - 各入力欄の直前に静的テキストを作るので、スクリーンリーダーとUI Automationは見出しを入力欄の名前として読む。Tab移動は `IsDialogMessageW`、ページ切り替えとF5はアクセラレーター。
 
-`yyaccountantw --ui-smoke-test DIR` は新しい `DIR/ui-test.sqlite3` に対して、実際のウィンドウへメッセージを送って操作する: 帳簿作成フォーム、貸借不一致の拒否と複合仕訳、全角金額のかんたん入力、JPYの小数の拒否、科目検索と使い分けの表示、取消・解除・検索、同じ番号での修正、別接続の変更の自動読み込みと古い版の保存の競合、4種類の帳票（試算表・貸借対照表の一致と元帳残高）、帳簿の設定、バックアップとCSV、個人事業主の事業割合、帳簿の切り替え、科目の追加・編集と取引先の追加・削除、債権の登録（発生の仕訳）と回収、予算の作成・科目の予算・外す、計画の計上と二重計上の拒否、統計・予測・変更履歴、原材料・仕入・設備（償却の計上）・製品の構成と標準原価・製造実績と在庫の払出し、税金（年分の追加、2段階のフォームでの入力、親族の追加と外す、計算結果の還付・住民税・ふるさと納税の税額控除の値）、ライフプラン（帳簿と手取りからの作成、家族・教育費・ローン返済額・イベントの追加、複製した提案との差、CSV）、6つの係数とチュートリアル、最小未満・最小・大きいサイズでの全ページの配置（はみ出しと重なり）、DPI変更、読み取り専用。結果を `DIR/ui-smoke.txt`、画面を `DIR/page1〜13.bmp` に書き、失敗時は `DIR/error.txt` に理由を書いて終了コード1で終わる。確認のためのメッセージボックスは出さず記録する。
+`yyaccountantw --ui-smoke-test DIR` は新しい `DIR/ui-test.sqlite3` に対して、実際のウィンドウへメッセージを送って操作する: 帳簿作成フォーム、貸借不一致の拒否と複合仕訳、全角金額のかんたん入力、JPYの小数の拒否、科目検索と使い分けの表示、取消・解除・検索、同じ番号での修正、別接続の変更の自動読み込みと古い版の保存の競合、4種類の帳票（試算表・貸借対照表の一致と元帳残高）、帳簿の設定、バックアップとCSV、個人事業主の事業割合、帳簿の切り替え、科目の追加・編集と取引先の追加・削除、債権の登録（発生の仕訳）と回収、予算の作成・科目の予算・外す、計画の計上と二重計上の拒否、統計・予測・変更履歴、原材料・仕入・設備（償却の計上）・製品の構成と標準原価・製造実績と在庫の払出し、税金（年分の追加、2段階のフォームでの入力、親族の追加と外す、計算結果の還付・住民税・ふるさと納税の税額控除の値）、ライフプラン（帳簿と手取りからの作成、家族・教育費・ローン返済額・イベントの追加、複製した提案との差、CSV）、6つの係数とチュートリアル、問題集（仕訳の逆の不正解と正解・数値・選択の採点と記録、進み具合、復習だけ表示、ヒントとシナリオの文章、シナリオの切り替え、練習用の帳簿の作成、読み取り専用での採点のみ）、最小未満・最小・大きいサイズでの全ページの配置（はみ出しと重なり）、DPI変更、読み取り専用。結果を `DIR/ui-smoke.txt`、画面を `DIR/page1〜14.bmp` に書き、失敗時は `DIR/error.txt` に理由を書いて終了コード1で終わる。確認のためのメッセージボックスは出さず記録する。
 
 ## 検証
 
@@ -134,9 +146,10 @@ python tools/test_native.py target/release/yyaccountantw.exe   # Windowsのみ
 
 - `core/tests/books.rs`: 十進数の保存（SQLiteの型がtext）、貸借不一致・桁超過・JSON小数の拒否、競合と監査、取消とIDの非再利用、家事按分と財務諸表、返済予定（元利均等の検算）と延滞、年度予算、計画の二重計上防止と予測、原価（移動平均・償却・標準原価・差異の手計算値）、科目検索。
 - `core/src/tax.rs` の試験: 給与所得の表、生命保険料控除の新旧と特例、副業・配偶者・子・同居の父母・医療費・住宅ローン・ふるさと納税のある世帯の所得税・住民税（手計算値）、令和8年分の178万円の壁。`core/src/lifeplan.rs` の試験: 変動率・運用益・資金不足の年・比較・CSV・6つの係数・ローン返済額・教育費。`core/tests/books.rs`: 版1のファイルの移行と、税額計算・ライフプランの保存と読み込み。
-- `core/tests/docs.rs`: `docs/user/accounts.md` が科目表から、`docs/user/tutorial.md` がチュートリアルから生成した内容と一致すること。
-- `tools/test_mcp.py`: 実プロセスのstdioで全体を操作し、デモDBの貸借一致・予測・延滞・原価、税額計算（住宅ローン控除でふるさと納税の実質負担が2,000円を超える例を含む）、ライフプランと比較・CSV、係数・ローン、チュートリアル、未対応の年分の拒否を確認。
+- `core/tests/study.rs`: 4シナリオ・55問の組み立て、正解の手計算値（給与所得の別表第五の4,000円単位、医療費控除の所得5%、住宅ローン控除の所得税・住民税の配分、元利均等返済、移動平均・標準原価・差異など）、採点の指摘、練習用の帳簿の再現、解答の記録と進み具合、版2のファイルの移行、問題の表示に正解が含まれないこと。
+- `core/tests/docs.rs`: `docs/user/accounts.md` が科目表から、`docs/user/tutorial.md` がチュートリアルから、`docs/user/study.md` が問題集から生成した内容と一致すること。
+- `tools/test_mcp.py`: 実プロセスのstdioで全体を操作し、デモDBの貸借一致・予測・延滞・原価、税額計算（住宅ローン控除でふるさと納税の実質負担が2,000円を超える例を含む）、ライフプランと比較・CSV、係数・ローン、チュートリアル、未対応の年分の拒否、問題集（正解を含まない一覧、仕訳の指摘、進み具合と復習、練習用の帳簿の貸借一致と住宅ローン控除、読み取り専用での採点のみ）を確認。
 - `tools/test_native.py`: `--ui-smoke-test` を実プロセスで終了まで待って実行し、作られたSQLiteを別に読んで、金額の列が全行 `text`、取消していない仕訳が十進数で貸借一致、監査の操作者と操作の種類、修正した仕訳の番号を確認する。結果と画面（PNG）を `target/native-validation/` に残す。
-- `tools/test_web.py`: 実サーバーでHost/Origin/CSRF/読み取り専用/競合/監査/バックアップを確認。`--browser` でChromiumを使い、両帳簿の全画面、科目検索からの入力と家事按分、明細3行の仕訳（JPYの小数を拒否→修正して保存）、チュートリアルから税金の画面へ、親族の追加と寄附額の変更、ライフプランの比較・教育費の追加・CSVのダウンロード、グラフのツールチップ、ダーク表示、スマートフォン幅の横はみ出しを確認し、コンソールエラー（CSP違反を含む）があれば失敗する。画面は `target/web-validation/` に保存する。
+- `tools/test_web.py`: 実サーバーでHost/Origin/CSRF/読み取り専用/競合/監査/バックアップと、問題集の解答者がログインユーザーになること（読み取り専用ユーザーは記録しない）を確認。`--browser` でChromiumを使い、両帳簿の全画面、科目検索からの入力と家事按分、明細3行の仕訳（JPYの小数を拒否→修正して保存）、チュートリアルから税金の画面へ、親族の追加と寄附額の変更、ライフプランの比較・教育費の追加・CSVのダウンロード、問題集（仕訳の誤答の指摘→修正して正解、全角数字の数値問題、選択肢ごとの解説、復習の絞り込み、練習用の帳簿の作成と税金の画面）、グラフのツールチップ、ダーク表示、スマートフォン幅の横はみ出しを確認し、コンソールエラー（CSP違反を含む）があれば失敗する。画面は `target/web-validation/` に保存する。
 
 デモDB `demo/yyaccountant-demo.sqlite3` は `yyaccountant --init-demo demo/yyaccountant-demo.sqlite3 --today 2026-10-29` で再生成できる（乱数を使わず決定的）。

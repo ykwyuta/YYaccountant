@@ -6,6 +6,7 @@ const $ = (s) => document.querySelector(s);
 const VIEWS = [
   ["home", "ホーム"],
   ["guide", "はじめに"],
+  ["study", "問題集"],
   ["input", "かんたん入力"],
   ["journal", "仕訳帳"],
   ["accounts", "勘定科目・取引先"],
@@ -248,12 +249,14 @@ function go(view) {
   history.replaceState(null, "", "#" + view);
   render();
 }
+/** Views that work without a selected book. */
+const BOOKLESS = new Set(["guide", "study"]);
 async function render() {
   for (const b of document.querySelectorAll("#views button"))
     b.setAttribute("aria-current", b.dataset.view === S.view ? "page" : "false");
   $("#view-title").textContent = VIEWS.find(([k]) => k === S.view)[1];
   const surface = $("#surface");
-  if (!S.book) {
+  if (!S.book && !BOOKLESS.has(S.view)) {
     put(
       surface,
       h(
@@ -3700,6 +3703,7 @@ const SCREEN_VIEWS = {
   予算: "budget",
   税金: "tax",
   ライフプラン: "lifeplan",
+  問題集: "study",
 };
 RENDER.guide = async () => {
   S.tutorial = S.tutorial || (await api("tutorial")).chapters;
@@ -3749,6 +3753,403 @@ RENDER.guide = async () => {
   );
 };
 
+// ----- Study (problem sets) -----
+const STUDY_SCREENS = {
+  かんたん入力: "input",
+  仕訳帳: "journal",
+  帳票: "reports",
+  税金: "tax",
+  ライフプラン: "lifeplan",
+  "統計・予測": "stats",
+  "債権・債務": "claims",
+  計画: "plans",
+  原価管理: "cost",
+  "勘定科目・取引先": "accounts",
+  予算: "budget",
+};
+const LEVELS = { 1: "基本", 2: "標準", 3: "応用" };
+async function loadStudy() {
+  S.studyData = await api("study_list", {});
+  return S.studyData;
+}
+RENDER.study = async () => {
+  const data = await loadStudy();
+  const st = (S.studyState ||= { scenario: null, topic: "all", results: {} });
+  const progress = data.progress || {
+    problems: {},
+    scenarios: {},
+    topics: {},
+    total: { problems: 0, solved: 0 },
+    review: [],
+  };
+  const score = (x) => `${x?.solved ?? 0} / ${x?.problems ?? 0}`;
+  const tiles = h(
+    "div",
+    { class: "tiles" },
+    tile(
+      "解けた問題",
+      score(progress.total),
+      S.readonly ? "閲覧のみのユーザーは成績を保存しません" : "",
+    ),
+    data.topics.map(([, l]) => tile(l, score(progress.topics[l]))),
+    tile("復習する問題", String(progress.review.length), "最後の解答が不正解の問題"),
+  );
+  const scenario = data.scenarios.find((x) => x.id === st.scenario);
+  if (!scenario) {
+    return h(
+      "div",
+      {},
+      h(
+        "p",
+        { class: "muted" },
+        "具体的な人物・家族の1年を題材に、会計（記帳・帳票・原価）、税務（所得税・住民税）、ライフプランの問題を解きます。答えると自動で採点され、どこが違うかの指摘と解説が表示されます。数値の正解はアプリの計算と同じ方法で求めています（税額は令和8年分の基準による試算です）。",
+      ),
+      tiles,
+      h(
+        "div",
+        { class: "grid2" },
+        data.scenarios.map((x) =>
+          h(
+            "div",
+            { class: "card scenario-card" },
+            h("h2", {}, x.title),
+            h("p", { class: "muted" }, x.subtitle),
+            h("p", {}, x.story[0]),
+            h(
+              "div",
+              { class: "scenario-meta" },
+              h("span", { class: "badge" }, label("kinds", x.kind)),
+              h(
+                "span",
+                {},
+                `${x.problems.length}問 · 解けた問題 ${score(progress.scenarios[x.id])}`,
+              ),
+            ),
+            meter(String(progress.scenarios[x.id]?.solved ?? 0), String(x.problems.length)),
+            h(
+              "div",
+              { class: "toolbar" },
+              h(
+                "button",
+                {
+                  class: "primary",
+                  onclick: () => ((st.scenario = x.id), (st.topic = "all"), render()),
+                },
+                "このシナリオを解く",
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  const filters = [["all", "すべて"], ...data.topics, ["review", "復習"]];
+  const shown = scenario.problems.filter((p) =>
+    st.topic === "all"
+      ? true
+      : st.topic === "review"
+        ? progress.review.includes(p.id)
+        : p.topic === st.topic,
+  );
+  return h(
+    "div",
+    {},
+    h(
+      "div",
+      { class: "toolbar" },
+      h("button", { onclick: () => ((st.scenario = null), render()) }, "← シナリオ一覧"),
+      h("span", { class: "spacer" }),
+      h(
+        "button",
+        {
+          disabled: S.readonly,
+          title:
+            "シナリオの取引・債権債務・計画・税額・ライフプランを記録した帳簿を作り、通常の画面で確かめられます",
+          onclick: async () => {
+            try {
+              const r = await api("study_practice_book", { scenario_id: scenario.id });
+              await loadBooks(r.book_id);
+              message(`練習用の帳簿「${r.name}」を作りました。帳簿の選択欄で切り替えられます。`);
+              render();
+            } catch (e) {
+              message(e.message, true);
+            }
+          },
+        },
+        "練習用の帳簿を作る",
+      ),
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("h2", {}, scenario.title),
+      h("p", { class: "muted" }, scenario.subtitle),
+      scenario.story.map((p) => h("p", {}, p)),
+      table(
+        ["前提", "内容"],
+        scenario.facts.map(([k, v]) => h("tr", {}, h("th", { scope: "row" }, k), h("td", {}, v))),
+      ),
+    ),
+    h(
+      "div",
+      { class: "toolbar" },
+      h("span", { class: "muted" }, `解けた問題 ${score(progress.scenarios[scenario.id])}`),
+    ),
+    h(
+      "div",
+      { class: "subtabs", role: "tablist" },
+      filters.map(([k, l]) =>
+        h(
+          "button",
+          {
+            role: "tab",
+            "aria-selected": k === st.topic ? "true" : "false",
+            onclick: () => ((st.topic = k), render()),
+          },
+          l,
+        ),
+      ),
+    ),
+    shown.length
+      ? shown.map((p) => problemCard(scenario, p, progress.problems[p.id], st))
+      : h("p", { class: "muted" }, "この分類の問題はありません。"),
+  );
+};
+function problemCard(scenario, p, prog, st) {
+  const result = h("div", { class: "study-result", "aria-live": "polite" });
+  const status = prog
+    ? prog.last_correct
+      ? ["good", "正解済み"]
+      : ["bad", "前回不正解"]
+    : ["", "未回答"];
+  let read;
+  let input;
+  if (p.format.type === "choice") {
+    const name = "choice-" + p.id;
+    input = h(
+      "div",
+      { class: "choices", role: "radiogroup" },
+      p.format.options.map((o, i) =>
+        h(
+          "label",
+          {},
+          h("input", { type: "radio", name, value: i }),
+          h("span", {}, `${i + 1}. ${o}`),
+        ),
+      ),
+    );
+    read = () => {
+      const c = input.querySelector("input:checked");
+      if (!c) throw new Error("選択肢を選んでください");
+      return { choice: Number(c.value) };
+    };
+  } else if (p.format.type === "number") {
+    const box = h("input", { inputmode: "decimal", class: "amount", "aria-label": "答え" });
+    input = h(
+      "div",
+      { class: "toolbar" },
+      box,
+      h("span", {}, p.format.unit),
+      p.format.digits ? h("span", { class: "muted" }, `小数第${p.format.digits}位まで`) : null,
+    );
+    read = () => {
+      if (!box.value.trim()) throw new Error("数値を入力してください");
+      return { number: box.value };
+    };
+  } else {
+    const body = h("tbody");
+    const totals = h("div", { class: "muted" });
+    const recalc = () => {
+      let dr = 0n,
+        cr = 0n,
+        bad = false;
+      for (const tr of body.children) {
+        const a = dec(tr.querySelector(".debit").value),
+          b = dec(tr.querySelector(".credit").value);
+        if (a === null || b === null) bad = true;
+        else {
+          dr += a;
+          cr += b;
+        }
+      }
+      totals.className = bad ? "balance-ng" : dr === cr && dr > 0n ? "balance-ok" : "muted";
+      totals.textContent = bad
+        ? "金額を数値で入力してください"
+        : `借方合計 ${fmt(decText(dr))} ／ 貸方合計 ${fmt(decText(cr))}`;
+    };
+    const options = [["", "科目を選択"]];
+    for (const [cat, catLabel] of S.meta.categories)
+      for (const a of scenario.accounts.filter((x) => x.category === cat))
+        options.push([a.code, `${catLabel}｜${a.code} ${a.name}`]);
+    const addRow = () => {
+      const tr = h(
+        "tr",
+        {},
+        h(
+          "td",
+          {},
+          h(
+            "select",
+            { class: "account", "aria-label": "勘定科目" },
+            options.map(([v, l]) => h("option", { value: v }, l)),
+          ),
+        ),
+        h(
+          "td",
+          {},
+          h("input", {
+            class: "amount debit",
+            inputmode: "decimal",
+            "aria-label": "借方",
+            oninput: recalc,
+          }),
+        ),
+        h(
+          "td",
+          {},
+          h("input", {
+            class: "amount credit",
+            inputmode: "decimal",
+            "aria-label": "貸方",
+            oninput: recalc,
+          }),
+        ),
+        h(
+          "td",
+          {},
+          h(
+            "button",
+            { type: "button", title: "行を削除", onclick: () => (tr.remove(), recalc()) },
+            "×",
+          ),
+        ),
+      );
+      body.append(tr);
+    };
+    addRow();
+    addRow();
+    input = h(
+      "div",
+      {},
+      h(
+        "div",
+        { class: "scroll" },
+        h(
+          "table",
+          { class: "lines" },
+          h(
+            "thead",
+            {},
+            h(
+              "tr",
+              {},
+              ["勘定科目", "借方", "貸方", ""].map((t) => h("th", {}, t)),
+            ),
+          ),
+          body,
+        ),
+      ),
+      h(
+        "div",
+        { class: "toolbar" },
+        h("button", { type: "button", onclick: addRow }, "行を追加"),
+        totals,
+      ),
+    );
+    read = () => ({
+      journal: [...body.children]
+        .map((tr) => ({
+          account: tr.querySelector(".account").value,
+          debit: ascii(tr.querySelector(".debit").value),
+          credit: ascii(tr.querySelector(".credit").value),
+        }))
+        .filter((l) => l.account || l.debit || l.credit),
+    });
+  }
+  const hint = h("p", { class: "hint", hidden: true }, "ヒント：", p.hint);
+  const show = (g) => {
+    put(
+      result,
+      h(
+        "p",
+        { class: g.correct ? "verdict ok" : "verdict ng" },
+        g.correct ? "✓ 正解です" : "✗ 不正解です",
+      ),
+      g.feedback.length
+        ? h(
+            "ul",
+            { class: "feedback" },
+            g.feedback.map((f) => h("li", {}, f)),
+          )
+        : null,
+      h("p", {}, h("strong", {}, "正解："), g.expected),
+      h("p", { class: "pre" }, g.explanation),
+      g.reasons.length
+        ? h(
+            "details",
+            {},
+            h("summary", {}, "選択肢ごとの解説"),
+            h(
+              "ol",
+              {},
+              g.reasons.map((r) => h("li", {}, r)),
+            ),
+          )
+        : null,
+    );
+  };
+  if (st.results[p.id]) show(st.results[p.id]);
+  const badge = h("span", { class: "badge " + status[0] }, status[1]);
+  const screen = STUDY_SCREENS[p.screen.split("（")[0]];
+  return h(
+    "section",
+    { class: "card problem", id: "problem-" + p.id },
+    h(
+      "div",
+      { class: "problem-head" },
+      h("h3", {}, `${p.id}　${p.title}`),
+      h(
+        "span",
+        { class: "badge" },
+        (S.studyData.topics.find(([k]) => k === p.topic) || [null, p.topic])[1],
+      ),
+      h("span", { class: "badge" }, LEVELS[p.level]),
+      badge,
+    ),
+    h("p", {}, p.question),
+    input,
+    h(
+      "div",
+      { class: "toolbar" },
+      h(
+        "button",
+        {
+          class: "primary",
+          onclick: async () => {
+            try {
+              const g = await api("study_answer", { problem_id: p.id, answer: read() });
+              st.results[p.id] = g;
+              show(g);
+              badge.className = "badge " + (g.correct ? "good" : "bad");
+              badge.textContent = g.correct ? "正解済み" : "前回不正解";
+              await loadStudy();
+            } catch (e) {
+              put(result, h("p", { class: "verdict ng" }, e.message));
+            }
+          },
+        },
+        "答え合わせ",
+      ),
+      h("button", { onclick: () => (hint.hidden = !hint.hidden) }, "ヒント"),
+      screen && S.book
+        ? h("button", { onclick: () => go(screen) }, `「${p.screen}」を開く`)
+        : h("span", { class: "muted" }, `関係する画面: ${p.screen}`),
+    ),
+    hint,
+    result,
+  );
+}
+
 // ----- Tax -----
 const orZero = (v) => v ?? "0";
 const yearsOld = (year, born) => (born ? `${year - born}歳` : "");
@@ -3775,7 +4176,9 @@ RENDER.tax = async () => {
       : null,
     t ? h("button", { disabled: ro, onclick: () => editIncome(t) }, "収入...") : null,
     t ? h("button", { disabled: ro, onclick: () => editFamily(t) }, "家族...") : null,
-    t ? h("button", { disabled: ro, onclick: () => editDependent(t, null) }, "親族を追加...") : null,
+    t
+      ? h("button", { disabled: ro, onclick: () => editDependent(t, null) }, "親族を追加...")
+      : null,
     t ? h("button", { disabled: ro, onclick: () => editDeductions(t) }, "控除...") : null,
     t ? h("button", { disabled: ro, onclick: () => editHousing(t) }, "住宅ローン...") : null,
     h("span", { class: "spacer" }),
@@ -3869,7 +4272,11 @@ RENDER.tax = async () => {
           ),
           { numeric: [3] },
         )
-      : h("p", { class: "muted" }, "子や同居の親など、生計を一にする親族を「親族を追加...」で入れます。"),
+      : h(
+          "p",
+          { class: "muted" },
+          "子や同居の親など、生計を一にする親族を「親族を追加...」で入れます。",
+        ),
   );
   let section = "";
   const rows = [];
@@ -3990,7 +4397,12 @@ function editIncome(t) {
       },
       moneyField(t, "side_revenue", "副業の収入", "売上・報酬の合計（2か所目の給与なら支払金額）"),
       moneyField(t, "side_expenses", "副業の経費"),
-      moneyField(t, "side_withheld", "副業の源泉徴収税額", "報酬から天引きされた税額（支払調書など）"),
+      moneyField(
+        t,
+        "side_withheld",
+        "副業の源泉徴収税額",
+        "報酬から天引きされた税額（支払調書など）",
+      ),
       {
         key: "blue_deduction",
         label: "青色申告特別控除",
@@ -4055,7 +4467,13 @@ function editFamily(t) {
 function editDependent(t, index) {
   const d = index === null ? null : t.dependents[index];
   const f = fields([
-    { key: "name", label: "名前", value: d?.name ?? "", required: true, placeholder: "例: 長男、父" },
+    {
+      key: "name",
+      label: "名前",
+      value: d?.name ?? "",
+      required: true,
+      placeholder: "例: 長男、父",
+    },
     {
       key: "relation",
       label: "続柄",
@@ -4103,7 +4521,12 @@ function editDeductions(t) {
     "控除",
     t,
     [
-      moneyField(t, "life_general_new", "一般生命保険料（新）", "2012年以後の契約。控除証明書の金額"),
+      moneyField(
+        t,
+        "life_general_new",
+        "一般生命保険料（新）",
+        "2012年以後の契約。控除証明書の金額",
+      ),
       moneyField(t, "life_general_old", "一般生命保険料（旧）", "2011年以前の契約"),
       moneyField(t, "life_care", "介護医療保険料"),
       moneyField(t, "life_pension_new", "個人年金保険料（新）"),
@@ -4134,7 +4557,10 @@ function editHousing(t) {
         "借入限度額",
         "入居年と住宅の種類で決まります（例: 2024・2025年入居の省エネ基準適合住宅は3,000万円、子育て世帯は4,000万円）。税務署からの申告書で確かめてください",
       ),
-      { ...moneyField(t, "housing_rate", "控除率（%）", "2022年以後の入居は0.7"), value: t.housing_rate },
+      {
+        ...moneyField(t, "housing_rate", "控除率（%）", "2022年以後の入居は0.7"),
+        value: t.housing_rate,
+      },
       {
         ...moneyField(
           t,
@@ -4144,7 +4570,15 @@ function editHousing(t) {
         ),
         value: t.housing_resident_cap,
       },
-      { ...moneyField(t, "per_capita", "住民税の均等割", "森林環境税を含む。多くの市区町村で5,000円"), value: t.per_capita },
+      {
+        ...moneyField(
+          t,
+          "per_capita",
+          "住民税の均等割",
+          "森林環境税を含む。多くの市区町村で5,000円",
+        ),
+        value: t.per_capita,
+      },
       { key: "name", label: "名前", value: t.name },
       { key: "memo", label: "メモ", type: "textarea", value: t.memo, wide: true },
     ],
@@ -4267,7 +4701,11 @@ RENDER.lifeplan = async () => {
     h("span", { class: "spacer" }),
     p ? h("button", { disabled: ro, onclick: () => remove("life_plan", p.id) }, "削除") : null,
     h("button", { disabled: ro, onclick: () => draftPlan() }, "帳簿から作成..."),
-    h("button", { class: "primary", disabled: ro, onclick: () => editPlan(null) }, "新しいプラン..."),
+    h(
+      "button",
+      { class: "primary", disabled: ro, onclick: () => editPlan(null) },
+      "新しいプラン...",
+    ),
   );
   if (!p)
     return h(
@@ -4308,7 +4746,11 @@ RENDER.lifeplan = async () => {
         ? `${r.shortfall_years[0]}〜${r.shortfall_years[r.shortfall_years.length - 1]}年`
         : "なし",
     ),
-    tile("期間の収支", decText(dec(r.total_income) - dec(r.total_expense)), `収入 ${fmt(r.total_income)}`),
+    tile(
+      "期間の収支",
+      decText(dec(r.total_income) - dec(r.total_expense)),
+      `収入 ${fmt(r.total_income)}`,
+    ),
   );
   const rowButtons = (edit, drop) =>
     h(
@@ -4428,7 +4870,11 @@ RENDER.lifeplan = async () => {
         h("td", { class: "num" }, x.year),
         x.ages.map((a) => h("td", { class: "num" }, a ?? "")),
         x.values.map((v) => num(isZero(v) ? "" : v)),
-        h("td", {}, x.events.map(([n, v]) => h("div", {}, `${n} ${fmt(v)}`))),
+        h(
+          "td",
+          {},
+          x.events.map(([n, v]) => h("div", {}, `${n} ${fmt(v)}`)),
+        ),
         num(x.income),
         num(x.expense),
         num(x.balance),
@@ -4461,7 +4907,9 @@ RENDER.lifeplan = async () => {
                 onchange: (e) => ((S.compareId = idOrNull(e.target.value)), render()),
               },
               h("option", { value: "" }, "（選ぶ）"),
-              others.map((x) => h("option", { value: x.id, selected: x.id === S.compareId }, x.name)),
+              others.map((x) =>
+                h("option", { value: x.id, selected: x.id === S.compareId }, x.name),
+              ),
             ),
           ),
         ),
@@ -4495,7 +4943,11 @@ RENDER.lifeplan = async () => {
                 { numeric: [1, 2, 3] },
               ),
             )
-          : h("p", { class: "muted" }, "「複製」で作った提案（繰上返済・保険の見直しなど）を選ぶと、年末の金融資産を年ごとに比べます。"),
+          : h(
+              "p",
+              { class: "muted" },
+              "「複製」で作った提案（繰上返済・保険の見直しなど）を選ぶと、年末の金融資産を年ごとに比べます。",
+            ),
       )
     : null;
   return h(
@@ -4524,7 +4976,10 @@ RENDER.lifeplan = async () => {
 };
 async function exportPlan(p) {
   const r = await api("life_plan_cash_flow", bookArgs({ life_plan_id: p.id, csv: true }));
-  download(new Blob([r.csv], { type: "text/csv; charset=utf-8" }), `${p.name}-キャッシュフロー表.csv`);
+  download(
+    new Blob([r.csv], { type: "text/csv; charset=utf-8" }),
+    `${p.name}-キャッシュフロー表.csv`,
+  );
 }
 function planYear() {
   return Number(today().slice(0, 4)) + 1;
@@ -4566,12 +5021,21 @@ function editPlan(p) {
 function draftPlan() {
   const taxes = S.book.tax_returns;
   const f = fields([
-    { key: "as_of", label: "基準日", type: "date", value: today(), help: "この日までの12か月の収支と、この日の預金残高を使います" },
+    {
+      key: "as_of",
+      label: "基準日",
+      type: "date",
+      value: today(),
+      help: "この日までの12か月の収支と、この日の預金残高を使います",
+    },
     {
       key: "tax",
       label: "収入",
       type: "select",
-      options: [["", "帳簿の収入を使う"], ...taxes.map((t) => [t.id, `「${t.name}」の手取りを使う`])],
+      options: [
+        ["", "帳簿の収入を使う"],
+        ...taxes.map((t) => [t.id, `「${t.name}」の手取りを使う`]),
+      ],
       value: taxes[taxes.length - 1]?.id ?? "",
     },
     { key: "name", label: "名前", value: "現状" },
@@ -4593,8 +5057,19 @@ function editMember(p, i) {
   const m = i === null ? null : p.members[i];
   const f = fields([
     { key: "name", label: "名前", value: m?.name ?? "", required: true },
-    { key: "relation", label: "続柄", value: m?.relation ?? "", placeholder: "本人・配偶者・長男・父など" },
-    { key: "birth_year", label: "生まれ年", type: "number", value: m?.birth_year ?? "", required: true },
+    {
+      key: "relation",
+      label: "続柄",
+      value: m?.relation ?? "",
+      placeholder: "本人・配偶者・長男・父など",
+    },
+    {
+      key: "birth_year",
+      label: "生まれ年",
+      type: "number",
+      value: m?.birth_year ?? "",
+      required: true,
+    },
   ]);
   modal(m ? `${m.name}を編集` : "家族を追加", f.element, {
     onSubmit: async () => {
@@ -4626,7 +5101,12 @@ function flowFields(x, p, single) {
     ...(single
       ? [{ key: "year", label: "年", type: "number", value: x?.year ?? p.start_year }]
       : [
-          { key: "start_year", label: "開始年", type: "number", value: x?.start_year ?? p.start_year },
+          {
+            key: "start_year",
+            label: "開始年",
+            type: "number",
+            value: x?.start_year ?? p.start_year,
+          },
           {
             key: "end_year",
             label: "終了年",
@@ -4683,7 +5163,13 @@ function educationForm(p) {
   const child = p.members.find((m) => /子|男|女|娘|息子/.test(m.relation + m.name));
   const f = fields([
     { key: "child", label: "子の名前", value: child?.name ?? "", required: true },
-    { key: "birth_year", label: "生まれ年", type: "number", value: child?.birth_year ?? "", required: true },
+    {
+      key: "birth_year",
+      label: "生まれ年",
+      type: "number",
+      value: child?.birth_year ?? "",
+      required: true,
+    },
     ...stages.map((st, i) => ({
       key: "s" + i,
       label: `${st.label}（${st.first_age}〜${st.last_age}歳）`,
@@ -4694,27 +5180,40 @@ function educationForm(p) {
     })),
     { key: "growth_percent", label: "教育費の上昇率（年%）", type: "decimal", value: "0" },
   ]);
-  modal("教育費を追加", h("div", {}, f.element, h("p", { class: "muted" }, "幼稚園〜高校は文部科学省「令和5年度子供の学習費調査」、大学は国立大学の標準額と私立大学の平均（文部科学省）による目安です。学校や地域で大きく違うので、追加後に実際の金額へ直してください。")), {
-    onSubmit: async () => {
-      const v = f.values();
-      const r = await api(
-        "fp_calculator",
-        bookArgs({
-          kind: "education",
-          child: v.child,
-          birth_year: v.birth_year,
-          schools: stages.map((_, i) => v["s" + i]),
-          growth_percent: orZero(v.growth_percent),
-        }),
-      );
-      await savePlan(
-        p,
-        { flows: [...p.flows, ...r.flows], events: [...p.events, ...r.events] },
-        `教育費を${r.flows.length}件追加しました`,
-      );
-      render();
+  modal(
+    "教育費を追加",
+    h(
+      "div",
+      {},
+      f.element,
+      h(
+        "p",
+        { class: "muted" },
+        "幼稚園〜高校は文部科学省「令和5年度子供の学習費調査」、大学は国立大学の標準額と私立大学の平均（文部科学省）による目安です。学校や地域で大きく違うので、追加後に実際の金額へ直してください。",
+      ),
+    ),
+    {
+      onSubmit: async () => {
+        const v = f.values();
+        const r = await api(
+          "fp_calculator",
+          bookArgs({
+            kind: "education",
+            child: v.child,
+            birth_year: v.birth_year,
+            schools: stages.map((_, i) => v["s" + i]),
+            growth_percent: orZero(v.growth_percent),
+          }),
+        );
+        await savePlan(
+          p,
+          { flows: [...p.flows, ...r.flows], events: [...p.events, ...r.events] },
+          `教育費を${r.flows.length}件追加しました`,
+        );
+        render();
+      },
     },
-  });
+  );
 }
 function loanForm(p) {
   const f = fields([
@@ -4724,12 +5223,21 @@ function loanForm(p) {
     { key: "years", label: "返済期間（年）", type: "number", value: 35 },
     { key: "start_year", label: "返済開始年", type: "number", value: p.start_year },
   ]);
-  const result = h("p", { class: "muted" }, "「計算」で毎月・年間の返済額を確かめてから追加します。");
+  const result = h(
+    "p",
+    { class: "muted" },
+    "「計算」で毎月・年間の返済額を確かめてから追加します。",
+  );
   const calc = async () => {
     const v = f.values();
     const r = await api(
       "fp_calculator",
-      bookArgs({ kind: "loan", principal: orZero(v.principal), rate: orZero(v.rate), years: v.years }),
+      bookArgs({
+        kind: "loan",
+        principal: orZero(v.principal),
+        rate: orZero(v.rate),
+        years: v.years,
+      }),
     );
     put(
       result,
@@ -4767,14 +5275,28 @@ function loanForm(p) {
   });
 }
 function coefficientCard() {
-  const rate = h("input", { inputmode: "decimal", value: "2", "aria-label": "利率", class: "amount" });
-  const years = h("input", { type: "number", value: "10", "aria-label": "年数", class: "short-num" });
+  const rate = h("input", {
+    inputmode: "decimal",
+    value: "2",
+    "aria-label": "利率",
+    class: "amount",
+  });
+  const years = h("input", {
+    type: "number",
+    value: "10",
+    "aria-label": "年数",
+    class: "short-num",
+  });
   const out = h("div");
   const calc = async () => {
     try {
       const c = await api(
         "fp_calculator",
-        bookArgs({ kind: "coefficients", rate: ascii(rate.value) || "0", years: Number(years.value) }),
+        bookArgs({
+          kind: "coefficients",
+          rate: ascii(rate.value) || "0",
+          years: Number(years.value),
+        }),
       );
       put(
         out,
@@ -4785,7 +5307,11 @@ function coefficientCard() {
             ["現価係数", c.present_value, "年数後の目標額に今いくら必要か"],
             ["年金終価係数", c.annuity_future, "毎年の積立が年数後にいくらになるか"],
             ["減債基金係数", c.sinking_fund, "目標額のために毎年いくら積み立てるか"],
-            ["資本回収係数", c.capital_recovery, "今の元本を取り崩すと毎年いくら受け取れるか（ローンの年返済額）"],
+            [
+              "資本回収係数",
+              c.capital_recovery,
+              "今の元本を取り崩すと毎年いくら受け取れるか（ローンの年返済額）",
+            ],
             ["年金現価係数", c.annuity_present, "毎年の受取を続けるには今いくら必要か"],
           ].map(([n, v, u]) => h("tr", {}, h("td", {}, n), num(v), h("td", { class: "muted" }, u))),
           { numeric: [1] },

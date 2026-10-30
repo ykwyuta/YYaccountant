@@ -8,11 +8,13 @@ const password = process.env.YYA_PASSWORD;
 const out = process.env.YYA_OUT || ".";
 const views = ["home", "guide", "input", "journal", "accounts", "claims", "budget", "plans", "cost", "stats", "tax", "lifeplan", "reports", "audit"];
 
+let current = null;
+const errors = [];
 (async () => {
   const browser = await chromium.launch();
-  const errors = [];
   for (const scheme of ["light", "dark"]) {
     const page = await browser.newPage({ viewport: { width: 1360, height: 900 }, colorScheme: scheme });
+    current = page;
     page.on("console", (m) => m.type() === "error" && errors.push(`${scheme}: ${m.text()}`));
     page.on("pageerror", (e) => errors.push(`${scheme}: ${e.message}`));
     await page.goto(url);
@@ -148,6 +150,43 @@ const views = ["home", "guide", "input", "journal", "accounts", "claims", "budge
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.waitForSelector("#tooltip:not([hidden])");
     await shot("home-tooltip");
+    // Problem sets: wrong journal → feedback, correct number → explanation, progress and practice book.
+    await page.click('[data-view="study"]');
+    await waitIdle();
+    await shot("study-list");
+    await page.click('.scenario-card:has-text("佐藤健さん") button.primary');
+    await waitIdle();
+    const sato = page.locator("#problem-sato-04 tbody tr");
+    await page.click('#problem-sato-04 button:has-text("行を追加")');
+    await sato.nth(0).locator("select").selectOption("121");
+    await sato.nth(0).locator(".debit").fill("330,000");
+    await sato.nth(1).locator("select").selectOption("401");
+    await sato.nth(1).locator(".credit").fill("330000");
+    await page.click("#problem-sato-04 button.primary");
+    await page.waitForSelector('#problem-sato-04 .feedback li:has-text("事業主貸")');
+    await sato.nth(0).locator(".debit").fill("296307");
+    await sato.nth(2).locator("select").selectOption("191");
+    await sato.nth(2).locator(".debit").fill("33693");
+    await page.waitForSelector('#problem-sato-04 .balance-ok');
+    await page.click("#problem-sato-04 button.primary");
+    await page.waitForSelector("#problem-sato-04 .verdict.ok");
+    await page.fill("#problem-sato-02 input.amount", "４４，０００");
+    await page.click("#problem-sato-02 button.primary");
+    await page.waitForSelector("#problem-sato-02 .verdict.ok");
+    await page.check('#problem-sato-05 input[value="1"]');
+    await page.click("#problem-sato-05 button.primary");
+    await page.waitForSelector('#problem-sato-05 .verdict.ng');
+    await page.click('#problem-sato-05 summary:has-text("選択肢ごとの解説")');
+    await shot("study-sato");
+    await page.click('.subtabs button:has-text("復習")');
+    await waitIdle();
+    if ((await page.locator("section.problem").count()) !== 1) throw new Error("review should list the one wrong problem");
+    await page.click('button:has-text("練習用の帳簿を作る")');
+    await page.waitForSelector('#message:not(.error):has-text("練習用の帳簿")');
+    if (!(await page.textContent("#books option:checked")).includes("学習：佐藤健さん")) throw new Error("practice book not selected");
+    await page.click('[data-view="tax"]');
+    await waitIdle();
+    await shot("study-practice-tax");
     // Narrow layout has no horizontal page scroll.
     await page.setViewportSize({ width: 390, height: 800 });
     await page.click('[data-view="input"]');
@@ -161,7 +200,18 @@ const views = ["home", "guide", "input", "journal", "accounts", "claims", "budge
   const real = errors.filter((e) => !/status of 40[0-9]/.test(e));
   if (real.length) throw new Error("Console errors:\n" + real.join("\n"));
   console.log("Browser validation passed");
-})().catch((e) => {
+})().catch(async (e) => {
   console.error(e);
+  if (errors.length) console.error("console errors:\n" + errors.join("\n"));
+  // Keep what the page showed so a failure on a CI runner can be diagnosed from the artifact.
+  if (current && !current.isClosed()) {
+    try {
+      console.error("message:", await current.textContent("#message", { timeout: 2000 }));
+      console.error("tiles:", await current.textContent(".tiles", { timeout: 2000 }));
+      await current.screenshot({ path: path.join(out, "failure.png"), fullPage: true });
+    } catch (x) {
+      console.error("could not record the failure:", x.message);
+    }
+  }
   process.exit(1);
 });
