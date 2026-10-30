@@ -50,7 +50,7 @@ def main():
             tool(4, "account_guide", {"book_id": 1, "query": "スーパーで食材"}),
         ])
         assert rows[1]["result"]["protocolVersion"] == "2025-11-25"
-        assert len(rows[2]["result"]["tools"]) == 21
+        assert len(rows[2]["result"]["tools"]) == 24
         accounts = {a["code"]: a["id"] for a in data(rows, 3)["accounts"]}
         assert data(rows, 4)["suggestions"][0]["code"] == "501"
         food, bank, card = accounts["501"], accounts["111"], accounts["201"]
@@ -151,7 +151,7 @@ def main():
         assert draft["draft"]["flows"][0]["name"] == "手取り収入（税額計算から）"
         assert data(rows, 53)["future_value"] == "1.218994"
         assert data(rows, 54)["monthly"] == "84686"
-        assert len(data(rows, 55)["chapters"]) == 3
+        assert len(data(rows, 55)["chapters"]) == 4
         assert data(rows, 56)["income_tax"] == "0"  # 178万円の壁（令和8年分）
         assert rows[57]["result"]["isError"] and "対応していません" in rows[57]["result"]["content"][0]["text"]
         print(json.dumps({
@@ -163,6 +163,47 @@ def main():
             "bakery_inventory": cost["inventory_value"],
             "standard_costs": {p["name"]: p["standard"]["total"] for p in cost["products"]},
         }, ensure_ascii=False, indent=1))
+
+        # Problem sets: answers are hidden until graded, attempts persist per learner,
+        # and a scenario becomes an ordinary book.
+        study_db = Path(directory) / "study.sqlite3"
+        rows = exchange(executable, study_db, initialize() + [
+            tool(60, "study_list", {}),
+            tool(61, "study_answer", {"problem_id": "aoki-02", "actor": "hina", "answer": {"journal": [
+                {"account": "401", "debit": "192000"}, {"account": "111", "credit": "192000"}]}}),
+            tool(62, "study_answer", {"problem_id": "aoki-02", "actor": "hina", "answer": {"journal": [
+                {"account": "111", "debit": "192,000"}, {"account": "401", "credit": "192,000"}]}}),
+            tool(63, "study_answer", {"problem_id": "yamamoto-08", "actor": "hina", "answer": {"number": "133,600"}}),
+            tool(64, "study_answer", {"problem_id": "sato-01", "actor": "hina", "answer": {"choice": 0}}),
+            tool(65, "study_list", {"actor": "hina", "scenario": "sato"}),
+            tool(66, "study_practice_book", {"scenario_id": "yamamoto", "actor": "hina"}),
+            tool(67, "study_answer", {"problem_id": "aoki-02", "actor": "hina", "answer": {"number": "1"}}),
+        ])
+        listing = data(rows, 60)
+        assert [s["id"] for s in listing["scenarios"]] == ["aoki", "sato", "yamamoto", "komugi"]
+        assert sum(len(s["problems"]) for s in listing["scenarios"]) == 55
+        assert "正解です" not in json.dumps(listing, ensure_ascii=False)
+        wrong = data(rows, 61)
+        assert not wrong["correct"] and any("逆" in f for f in wrong["feedback"]) and wrong["attempt"]
+        assert data(rows, 62)["correct"] and data(rows, 63)["correct"]
+        assert not data(rows, 64)["correct"] and len(data(rows, 64)["reasons"]) == 4
+        progress = data(rows, 65)["progress"]
+        assert len(data(rows, 65)["scenarios"]) == 1
+        assert progress["total"]["solved"] == 2 and progress["review"] == ["sato-01"]
+        book = data(rows, 66)
+        assert book["name"].startswith("学習：")
+        assert rows[67]["result"]["isError"]
+        rows = exchange(executable, study_db, initialize() + [
+            tool(70, "report", {"book_id": book["book_id"], "kind": "balance_sheet", "to": "2026-12-31"}),
+            tool(71, "tax_calculate", {"book_id": book["book_id"], "tax_return_id": 1}),
+            tool(72, "study_answer", {"problem_id": "aoki-01", "actor": "viewer", "answer": {"choice": 2}}),
+        ], read_only=True)
+        assert data(rows, 70)["balanced"]
+        housing = [l for l in data(rows, 71)["lines"] if l["label"] == "住宅借入金等特別控除"][0]
+        assert housing["income_tax"] == "-133600"
+        assert data(rows, 72)["correct"] and data(rows, 72)["attempt"] is None
+        with closing(sqlite3.connect(study_db)) as connection:
+            assert connection.execute("SELECT count(*) FROM study_attempts").fetchone()[0] == 4
     print("MCP stdio validation passed")
 
 

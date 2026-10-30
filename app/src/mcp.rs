@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead, Read, Write};
 use yy_accountant::{
     Book, BookKind, Category, Change, LifePlan, NewBook, Role, Store, TaxReturn, budget, chart,
-    claims, cost, forecast, lifeplan, model, num, plans, reports, tax, tutorial,
+    claims, cost, forecast, lifeplan, model, num, plans, reports, study, tax, tutorial,
 };
 const MAX_MESSAGE: usize = 2 * 1024 * 1024;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -19,7 +19,9 @@ fn op(name: &str, properties: Value, required: &[&str]) -> Value {
     r.extend_from_slice(required);
     obj(p, &r)
 }
-pub(crate) const MUTATING: &[&str] = &["book_create", "book_change"];
+pub(crate) const MUTATING: &[&str] = &["book_create", "book_change", "study_practice_book"];
+/// Tools whose `actor` is the learner; the Web UI sets it to the signed-in user.
+pub(crate) const LEARNER: &[&str] = &["study_list", "study_answer"];
 
 fn tools() -> Value {
     let id = json!({"type":"integer","minimum":1});
@@ -121,7 +123,17 @@ fn tools() -> Value {
                    required: &[&str],
                    read_only: bool| {
         let mut p = properties;
-        if !["book_list", "book_create", "tutorial", "metadata"].contains(&name) {
+        if ![
+            "book_list",
+            "book_create",
+            "tutorial",
+            "metadata",
+            "study_list",
+            "study_answer",
+            "study_practice_book",
+        ]
+        .contains(&name)
+        {
             p["book_id"] = id.clone();
         }
         list.push(json!({"name":name,"description":description,"inputSchema":obj(p,required),"annotations":{"readOnlyHint":read_only,"destructiveHint":false,"idempotentHint":read_only,"openWorldHint":false}}));
@@ -266,6 +278,32 @@ fn tools() -> Value {
         json!({}),
         &[],
         true,
+    );
+    let answer = json!({"oneOf":[
+        obj(json!({"choice":{"type":"integer","minimum":0,"description":"0-based option index"}}),&["choice"]),
+        obj(json!({"journal":{"type":"array","minItems":1,"maxItems":20,"items":obj(json!({"account":{"type":"string","description":"account code of the scenario"},"debit":{"type":"string"},"credit":{"type":"string"}}),&["account"])}}),&["journal"]),
+        obj(json!({"number":{"type":"string","description":"e.g. \"435,600\" or \"22.3\""}}),&["number"]),
+    ]});
+    add(
+        "study_list",
+        "Problem sets for learning accounting, tax and life planning through concrete scenarios (a new graduate, an employee with a side business, a family buying a home, a bakery's costing). Returns each scenario's story, facts, the accounts usable in journal answers and the problems without answers. With actor, also that learner's progress and the problems to review.",
+        json!({"actor":text,"scenario":text}),
+        &[],
+        true,
+    );
+    add(
+        "study_answer",
+        "Grade an answer to a study problem and return whether it is correct, the expected answer, targeted feedback and the explanation. Records the attempt for actor unless record is false or the database is read-only.",
+        json!({"problem_id":text,"answer":answer,"actor":text,"record":flag}),
+        &["problem_id", "answer", "actor"],
+        false,
+    );
+    add(
+        "study_practice_book",
+        "Create a new book containing a study scenario's records (transactions, claims, plans, tax return, life plans) so the learner can explore them in the normal screens.",
+        json!({"scenario_id":text,"actor":text}),
+        &["scenario_id", "actor"],
+        false,
     );
     add(
         "metadata",
@@ -465,6 +503,32 @@ struct Audit {
     #[serde(default)]
     after: i64,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StudyList {
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    scenario: Option<String>,
+}
+fn yes() -> bool {
+    true
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StudyAnswer {
+    problem_id: String,
+    answer: study::Answer,
+    actor: String,
+    #[serde(default = "yes")]
+    record: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Practice {
+    scenario_id: String,
+    actor: String,
+}
 fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
     Ok(serde_json::from_value(v)?)
 }
@@ -642,6 +706,48 @@ pub(crate) fn call(store: &mut Store, name: &str, a: Value) -> Result<Value> {
                     json!({"flows": flows, "events": events})
                 }
             }
+        }
+        "study_list" => {
+            let l: StudyList = args(a)?;
+            let scenarios: Vec<_> = study::scenarios_all()
+                .iter()
+                .filter(|s| l.scenario.as_deref().is_none_or(|id| id == s.id))
+                .map(study::Scenario::view)
+                .collect();
+            if scenarios.is_empty() {
+                return Err("シナリオがありません".into());
+            }
+            let progress = match &l.actor {
+                Some(actor) => Some(study::progress(&store.attempts(actor)?)),
+                None => None,
+            };
+            json!({"scenarios": scenarios, "progress": progress, "topics": study::Topic::ALL.iter().map(|t| json!([t, t.label()])).collect::<Vec<_>>()})
+        }
+        "study_answer" => {
+            let x: StudyAnswer = args(a)?;
+            let grade = study::grade(&x.problem_id, &x.answer)?;
+            let attempt = if x.record && !store.read_only() {
+                Some(store.record_attempt(
+                    &x.actor,
+                    &x.problem_id,
+                    &serde_json::to_value(&x.answer)?,
+                    grade.correct,
+                )?)
+            } else {
+                None
+            };
+            let mut v = serde_json::to_value(grade)?;
+            v["attempt"] = json!(attempt);
+            v
+        }
+        "study_practice_book" => {
+            let x: Practice = args(a)?;
+            let (request, changes) = study::practice(&x.scenario_id)?;
+            let mut book = store.create(&request, &x.actor)?;
+            for c in changes {
+                book = store.apply(book.id, book.revision, c, &x.actor)?.book;
+            }
+            json!({"book_id": book.id, "name": book.name, "revision": book.revision})
         }
         "tutorial" => {
             if !a.as_object().is_some_and(|o| o.is_empty()) {
@@ -835,7 +941,7 @@ mod tests {
         );
         assert_eq!(out[0]["error"]["code"], -32000);
         let tools = out[2]["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 24);
         for t in tools {
             assert_eq!(t["inputSchema"]["additionalProperties"], false);
         }

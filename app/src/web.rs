@@ -303,6 +303,15 @@ fn process(s: &Service, path: &str, headers: &HeaderMap, bytes: &[u8]) -> Respon
             o.insert("actor".into(), json!(user.name));
         }
     }
+    if mcp::LEARNER.contains(&tool)
+        && let Some(o) = arguments.as_object_mut()
+    {
+        // Progress always belongs to the signed-in user; read-only users practise without saving.
+        o.insert("actor".into(), json!(user.name));
+        if tool == "study_answer" && (user.read_only || s.read_only) {
+            o.insert("record".into(), json!(false));
+        }
+    }
     match mcp::call(&mut store, tool, arguments) {
         Ok(v) => reply(StatusCode::OK, v),
         Err(e) => {
